@@ -49,16 +49,13 @@ _COND_KEYS = set(DEFAULT_CFG)
 
 
 def _add_nmg_path():
-    p = os.environ.get("NMG_PATH")
-    if not p:
-        here = os.path.dirname(os.path.abspath(__file__))
-        guess = os.path.abspath(os.path.join(here, "..", "..", "..",
-                                             "Neural_Music_Generator"))
-        p = guess if os.path.isdir(guess) else None
-    if not p or not os.path.isdir(p):
-        raise RuntimeError(
-            "Set NMG_PATH to your Neural_Music_Generator checkout (the code, "
-            "presets/ and optionally the checkpoints).")
+    """Where the model code lives: $NMG_PATH if set, else the copy bundled in
+    this repo (OctopusMusic/nmg), so a fresh GPU box needs nothing else."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.abspath(os.path.join(here, "..", "..", "nmg"))
+    p = os.environ.get("NMG_PATH") or bundled
+    if not os.path.isfile(os.path.join(p, "real_backend.py")):
+        raise RuntimeError(f"model code not found in {p} (set NMG_PATH, or restore OctopusMusic/nmg)")
     if p not in sys.path:
         sys.path.insert(0, p)
     return p
@@ -110,11 +107,15 @@ class Engine:
     def _load_real(self):
         nmg = self.nmg
         os.environ["STYLE_CKPT"] = _resolve_ckpt(nmg, "STYLE_CKPT", "style.pt")
+        # CLAP modality centroids for text style (same files app_hf.py uses)
+        for cand in ("clap_nopre_clap_modality_train.npz", "clap_nopre_clap_modality_val.npz"):
+            if os.path.exists(os.path.join(nmg, cand)) and "MODALITY_NPZ" not in os.environ:
+                os.environ["MODALITY_NPZ"] = os.path.join(nmg, cand)
         from real_backend import RealBackend
-        ckpts = {1: _resolve_ckpt(nmg, "STAGE1_CKPT", "stage1.pt"),
-                 2: _resolve_ckpt(nmg, "STAGE2_CKPT", "stage2.pt")}
-        if os.environ.get("LOAD_STAGE1", "0") != "1":
-            ckpts.pop(1)                 # live mode is stage 2 only; save VRAM
+        # live mode is stage 2 only: don't download or load stage 1 unless asked
+        ckpts = {2: _resolve_ckpt(nmg, "STAGE2_CKPT", "stage2.pt")}
+        if os.environ.get("LOAD_STAGE1", "0") == "1":
+            ckpts[1] = _resolve_ckpt(nmg, "STAGE1_CKPT", "stage1.pt")
         be = RealBackend(
             model_ckpts=ckpts, default_stage=2,
             tokenizer_ckpt=_resolve_ckpt(nmg, "TOKENIZER_CKPT", "tokenizer.pt"),

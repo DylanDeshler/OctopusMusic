@@ -3,5 +3,6 @@ numpy
 scipy
 aiohttp
 bleak          # Octopus 16 over Bluetooth LE
+pyserial       # Octopus 16 over USB-C (octomusic firmware)
 sounddevice    # speaker output (PortAudio)
 soundfile      # session recordings

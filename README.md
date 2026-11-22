@@ -50,26 +50,32 @@ a live performance.
 
 ### GPU box
 
+The repo is self-contained: the model code and presets are bundled in `nmg/`, copied
+unmodified from the Neural Music Generator Space (commit in `nmg/SOURCE_COMMIT`).
+Only the checkpoints come from elsewhere.
+
 ```bash
-git clone <this repo> && git clone <your Neural_Music_Generator repo>
-pip install -r OctopusMusic/requirements-server.txt
-cd OctopusMusic
-NMG_PATH=../Neural_Music_Generator python -m octomusic.server
+rsync -av --exclude .venv --exclude recordings --exclude firmware OctopusMusic/ you@gpu-box:~/OctopusMusic/
+# on the GPU box
+cd ~/OctopusMusic && python3 -m venv .venv && source .venv/bin/activate
+pip install torch torchaudio            # the build matching the box's CUDA
+pip install -r requirements-server.txt
+python -m octomusic.server              # in tmux
 ```
 
-The server finds checkpoints the same way `app_hf.py` does. It first looks for a local
-path (as given, or inside `NMG_PATH`). Failing that, it downloads from `MODEL_REPO`
+Checkpoints (`stage2.pt`, `tokenizer.pt`, `adapter.pt`, `style.pt`, about 6.5 GB): copy
+them into `~/OctopusMusic/nmg/`, or let the server download them from `MODEL_REPO`
 (default `ddeshler/NeuralMusic`; set `HF_TOKEN` if the repo is private).
 
 | env | default | |
 |---|---|---|
-| `NMG_PATH` | `../Neural_Music_Generator` | model code and `presets/*.npz` |
-| `STAGE2_CKPT`, `TOKENIZER_CKPT`, `ADAPTER_CKPT`, `STYLE_CKPT` | `stage2.pt`, … | local path or a filename in the model repo |
-| `LOAD_STAGE1` | `0` | live mode is stage 2 only, so stage 1 is not loaded and the VRAM is saved |
+| `NMG_PATH` | the bundled `nmg/` | point at a Neural_Music_Generator checkout to use live model code instead |
+| `STAGE2_CKPT`, `TOKENIZER_CKPT`, `ADAPTER_CKPT`, `STYLE_CKPT` | `stage2.pt`, … | local path (or a filename inside `nmg/`), else downloaded |
+| `LOAD_STAGE1` | `0` | live mode uses stage 2 only, so stage 1 is neither downloaded nor loaded |
 | `CFG_MODE`, `T_DIST` | `joint`, `logit` | same as the Space |
 
-The server binds to `127.0.0.1:8765`, so nothing is publicly exposed. `--mock` runs NMG's
-`MockBackend` (no torch, no GPU) for testing the plumbing.
+The server binds to `127.0.0.1:8765`, so nothing is publicly exposed. `--mock` runs the
+mock backend (no torch, no GPU) to test the plumbing.
 
 ### Laptop
 
@@ -89,12 +95,71 @@ This opens `http://localhost:8080`. Other source options:
   recording with known structure (30 s eyes-open/closed alpha blocks, jaw clenches
   every 20 s, blinks), so offline mode can be tried before any real session.
 - `--ble-address <addr>`: skips the Bluetooth scan.
+- `--source octopus-usb [--usb-port /dev/cu.usbmodem101]`: the headset over USB-C. It
+  needs the OctopusMusic firmware (see **Firmware** below); the port is auto-detected
+  by Espressif's USB vendor ID.
 
 On macOS, the terminal (or IDE) running the client needs Bluetooth permission: System
 Settings → Privacy & Security → Bluetooth.
 
 **Safety:** only run the headset on its battery while it is on your head. Don't wear it
 while it's plugged into USB, because the board has no isolation.
+
+## Firmware and connecting the headset
+
+The XIAO ESP32-S3 shipped with **Seeed's factory camera demo**, which doesn't touch the
+ADCs. It has to be flashed. Two images exist:
+
+| image | EEG over | notes |
+|---|---|---|
+| official `octopus16.bin` v1.0.0 (octoBridge, `octobridge.pieeg.com/flash`) | **BLE only**, one notification per sample | macOS dropped ~50% of samples in testing (125 of 250 Hz arrived) |
+| **`firmware/octopus_usb`** (this repo) | **USB-C serial** (send `S`) **and BLE**, batched 4 samples per notification | same packets, UUIDs and name format, so official tools still work |
+
+USB is strictly better for data: no loss, no pairing, and nothing to tune. Bluetooth
+remains for untethered use.
+
+**⚠ USB safety:** the board has no electrical isolation. While the headset is worn over
+USB, the computer must be **on battery, charger unplugged, nothing mains-powered
+attached** (no monitor or dock). Bluetooth avoids the issue.
+
+What was measured on this board, with the board off the head and connected to the laptop:
+
+| | official v1.0.0 | OctopusMusic firmware |
+|---|---|---|
+| boot | ADC2 found, 16 ch, 250 SPS, CLKIN 8 MHz on D6 | same |
+| BLE (macOS) | 125 Hz received, ~51% lost | **249.8 Hz, 0 lost** (20 s) |
+| USB-C | no EEG (log text only) | **249.6 Hz, 0 lost** (20 s) |
+
+The full client on `--source octopus-usb` ran at 249.9 Hz with 0% loss and computed
+features.
+
+Flashing (from the repo root):
+
+```bash
+brew install arduino-cli
+arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.13   # 3.3.x = ESP-IDF 5.5, like the official build; 4.0 changes the NimBLE API
+arduino-cli lib install NimBLE-Arduino
+FQBN=esp32:esp32:XIAO_ESP32S3:USBMode=hwcdc,CDCOnBoot=default
+arduino-cli compile --fqbn $FQBN firmware/octopus_usb
+arduino-cli upload  --fqbn $FQBN -p /dev/cu.usbmodem101 firmware/octopus_usb
+```
+
+`firmware/backup/` holds the original Seeed demo (`seeed_demo_20261122.bin`) and the
+official image (`official_octopus16_v1.0.0.bin`). Either can be restored with
+`esptool --chip esp32s3 -p /dev/cu.usbmodem101 write-flash 0x0 <file>`. If the port
+ever disappears, hold **BOOT**, tap **RESET**, release **BOOT**, then flash again.
+
+Serial protocol of the OctopusMusic firmware (115200 baud; the rate is ignored on USB
+CDC):
+
+- `S`: start streaming 51-byte packets.
+- `X`: stop.
+- `I`: print info.
+- When not streaming, it prints a heartbeat line once a second
+  (`[HB] … rate=250/s usbdrop=…`).
+
+Opening the port resets the chip. The client waits for boot, then sends `S`.
 
 ## What's where
 
@@ -274,9 +339,9 @@ comfortable there. A faster GPU lowers the floor. Settings that lower it further
   `app_hf.build_backend` without the ZeroGPU wrapper and calls
   `RealBackend._continue_step(..., decode="new")` directly, the same call
   `stream_forward` makes. The first GPU run is where this gets proven.
-- **BLE hasn't been tried with the headset.** The decoder was unit-checked against
-  hand-built packets, and discovery follows the official quickstart (service UUID or
-  name prefix).
+- **Headset I/O is verified, but not yet on a head.** USB and BLE both stream at
+  250 Hz with no loss (see **Firmware**), but all signals so far are from a board on a
+  desk.
 - **Measured so far** (mock backend with a simulated 2 s compute): brain→ear held at
   exactly the delay for every measure with 0 re-buffers. A too-short delay degraded as
   designed (early authoring plus draft steps). Offline mapped EEG time to song time with

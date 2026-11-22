@@ -26,6 +26,7 @@ import csv
 import os
 import threading
 import time
+from collections import deque
 
 import numpy as np
 
@@ -105,22 +106,44 @@ class Source:
         self.buf = buf
         self.status = "idle"
         self.error = ""
+        self.reconnects = 0
+        self.events = deque(maxlen=50)     # (time, what went wrong)
         self._task = None
 
     def start(self):
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._guard())
 
+    reconnect = False          # hardware sources retry instead of dying
+
     async def _guard(self):
-        try:
-            await self.run()
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:  # noqa: BLE001
-            self.status, self.error = "error", f"{type(e).__name__}: {e}"
-        finally:
-            if self.status not in ("error",):
-                self.status = "stopped"
+        backoff = 1.0
+        while True:
+            t0 = time.time()
+            try:
+                await self.run()
+                if not self.reconnect:
+                    break
+                raise RuntimeError("stream ended")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001
+                self.error = f"{type(e).__name__}: {e}"
+                self.events.append((time.time(), self.error))
+                if not self.reconnect or getattr(e, "fatal", False):
+                    self.status = "error"
+                    return
+                if time.time() - t0 > 30:
+                    backoff = 1.0                  # it had been working: retry fast
+                self.reconnects += 1
+                self.status = f"reconnecting ({self.reconnects})"
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    break
+                backoff = min(10.0, backoff * 2)
+        if self.status != "error":
+            self.status = "stopped"
 
     async def stop(self):
         if self._task is not None:
@@ -136,7 +159,8 @@ class Source:
         raise NotImplementedError
 
     def info(self):
-        return {"name": self.name, "status": self.status, "error": self.error}
+        return {"name": self.name, "status": self.status, "error": self.error,
+                "reconnects": self.reconnects}
 
 
 # ---- the real device ----------------------------------------------------------
@@ -166,6 +190,7 @@ def parse_packets(data: bytes, last_counter):
 
 class OctopusBLE(Source):
     name = "octopus"
+    reconnect = True
 
     def __init__(self, buf, address: str | None = None, scan_timeout=10.0):
         super().__init__(buf)
@@ -211,6 +236,166 @@ class OctopusBLE(Source):
 
     def info(self):
         return {**super().info(), "device": self.device_name, "mtu": self.mtu}
+
+
+# ---- the real device, over USB ------------------------------------------------
+
+ESPRESSIF_VID = 0x303A
+
+
+def find_usb_port():
+    """The Octopus's XIAO ESP32-S3 USB serial port, or None."""
+    from serial.tools import list_ports
+    for p in list_ports.comports():
+        if p.vid == ESPRESSIF_VID:
+            return p.device
+    for p in list_ports.comports():
+        if "usbmodem" in p.device or "ttyACM" in p.device:
+            return p.device
+    return None
+
+
+def split_stream(buf: bytes | bytearray):
+    """Split a USB byte stream into 51-byte packets and text lines.
+
+    The firmware prints text (boot log, heartbeat) until streaming starts and
+    after it stops; packets are framed A0 ... C0. Text never contains 0xA0, so
+    anything that is not a framed packet is either a text line or junk to skip
+    up to the next 0xA0. Returns (packets, lines, bytes consumed); a partial
+    packet or line at the end is left for the next call."""
+    packets, lines = [], []
+    i, n = 0, len(buf)
+    while i < n:
+        if buf[i] == 0xA0:
+            if i + PACKET_LEN > n:
+                break
+            if buf[i + 50] == 0xC0:
+                packets.append(bytes(buf[i:i + PACKET_LEN]))
+                i += PACKET_LEN
+            else:
+                i += 1
+            continue
+        j = buf.find(b"\n", i)
+        k = buf.find(b"\xa0", i)
+        if k != -1 and (j == -1 or k < j):
+            i = k                                   # junk before a packet
+            continue
+        if j == -1:
+            if n - i > 512:
+                i = n                               # runaway junk
+            break
+        line = bytes(buf[i:j]).decode("utf-8", "replace").strip()
+        if line:
+            lines.append(line)
+        i = j + 1
+    return packets, lines, i
+
+
+class OctopusUSB(Source):
+    """The headset over its USB-C port. Needs the octomusic firmware
+    (firmware/octopus_usb): send 'S' and it writes the same 51-byte packets the
+    BLE characteristic carries, every sample, with no loss.
+
+    SAFETY: the board has no isolation. While the headset is worn over USB the
+    computer must run on battery with the charger unplugged and nothing
+    mains-powered attached.
+
+    Opening the port resets the ESP32 (the USB-serial peripheral does that on
+    connect), so this waits for the boot to finish before asking for data, and
+    keeps the firmware's text lines (boot log, heartbeat) for the UI."""
+    name = "octopus-usb"
+    reconnect = True
+
+    def __init__(self, buf, port: str | None = None):
+        super().__init__(buf)
+        self.port = port
+        self.log = deque(maxlen=20)
+        self.device_name = ""
+        self.reset_reasons = deque(maxlen=20)   # board's own reason for each boot
+        self.last_hb = ""
+        self._stop_evt = threading.Event()
+
+    async def run(self):
+        self._stop_evt.clear()
+        self.status = "connecting"
+        await asyncio.to_thread(self._worker)
+
+    async def stop(self):
+        self._stop_evt.set()
+        await super().stop()
+
+    def _worker(self):
+        import serial
+        port = self.port or find_usb_port()
+        if not port:
+            raise RuntimeError("no Octopus USB port found (is the USB-C cable data-capable?)")
+        self.device_name = port
+        s = serial.Serial()
+        s.port, s.baudrate, s.timeout = port, 115200, 0.05
+        s.dtr = False
+        s.rts = False
+        s.open()
+        try:
+            self._loop(s)
+        finally:
+            try:
+                s.write(b"X")
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _loop(self, s):
+        pending = bytearray()
+        last_ctr = None
+        t_open = time.time()
+        t_sent = 0.0
+        t_last_pkt = None
+        booted = False
+        while not self._stop_evt.is_set():
+            now = time.time()
+            if not booted and (now - t_open > 3.0):
+                booted = True
+            if booted and (t_last_pkt is None or now - t_last_pkt > 2.0) and now - t_sent > 2.0:
+                s.write(b"S")
+                t_sent = now
+                if t_last_pkt is None and now - t_open > 10.0:
+                    e = RuntimeError(
+                        "board answers but sends no EEG over USB: it is running firmware "
+                        "without USB streaming. Flash firmware/octopus_usb (see README), "
+                        "or use the Bluetooth source.")
+                    e.fatal = True
+                    raise e
+            chunk = s.read(4096)
+            if not chunk:
+                continue
+            pending += chunk
+            raw, lines, used = split_stream(pending)
+            del pending[:used]
+            for line in lines:
+                self.log.append(line)
+                if "Setup complete" in line:
+                    booted = True
+                if line.startswith("[BOOT] reset reason:"):
+                    self.reset_reasons.append((time.time(), line.split(":", 1)[1].strip()))
+                if line.startswith("[HB]"):
+                    self.last_hb = line
+            rows = []
+            if raw:
+                uv, last_ctr, lost = parse_packets(b"".join(raw), last_ctr)
+                self.buf.lost += lost
+                rows.append(uv)
+            if rows:
+                block = np.concatenate(rows)
+                self.buf.received += len(block)
+                self.buf.write(block)
+                t_last_pkt = time.time()
+                self.status = "streaming"
+
+    def info(self):
+        return {**super().info(), "device": self.device_name, "log": list(self.log)[-3:],
+                "last_hb": self.last_hb,
+                "reset_reasons": [r for _, r in self.reset_reasons][-5:],
+                "events": [e for _, e in self.events][-5:]}
 
 
 # ---- fake EEG -------------------------------------------------------------------

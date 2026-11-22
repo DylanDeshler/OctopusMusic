@@ -430,9 +430,14 @@ function pill(id, txt, cls) {
 function updateStatus(s) {
   const src = s.source || {};
   const fs = s.fs ? s.fs.toFixed(1) + " Hz" : "—";
-  pill("p-eeg", `EEG ${src.name || ""}: ${src.status || "—"} · ${fs} · loss ${s.loss_pct.toFixed(1)}%`,
-    src.status === "streaming" ? (s.loss_pct > 2 ? "warn" : "ok") : src.status === "error" ? "bad" : "");
-  if (src.error) flash(src.error);
+  pill("p-eeg", `EEG ${src.name || ""}: ${src.status || "—"} · ${fs} · loss ${s.loss_pct.toFixed(1)}%` +
+    (src.reconnects ? ` · ${src.reconnects} reconnect${src.reconnects > 1 ? "s" : ""}` : ""),
+    src.status === "streaming" ? (s.loss_pct > 2 || src.reconnects ? "warn" : "ok")
+      : src.status === "error" ? "bad" : (src.status || "").startsWith("reconnecting") ? "warn" : "");
+  $("p-eeg").title = [src.error && "last error: " + src.error,
+    src.reset_reasons && src.reset_reasons.length && "board boots: " + src.reset_reasons.join(", "),
+    src.last_hb].filter(Boolean).join("\n") || "EEG source · measured sample rate · packet loss";
+  if (src.status === "error" && src.error) flash(src.error);
   if (src.name && document.activeElement !== $("src-name") && $("src-name").value !== src.name) {
     $("src-name").value = src.name; $("src-path").classList.toggle("hidden", src.name !== "replay");
   }

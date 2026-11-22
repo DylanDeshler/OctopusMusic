@@ -31,7 +31,7 @@ from octomusic.client.dsp import DSP, FEATURES
 from octomusic.client.gpu_link import GPULink
 from octomusic.client.mapping import NORMS, PRESETS, SOURCES, Mapper
 from octomusic.client.recorder import Recorder
-from octomusic.client.sources import EEGBuffer, OctopusBLE, Replay, Synthetic
+from octomusic.client.sources import EEGBuffer, OctopusBLE, OctopusUSB, Replay, Synthetic
 from octomusic.model_space import (DEFAULT_BANDS, NOTE_NAMES, SCALAR_TARGETS,
                                    TARGET_LABELS, TARGETS, bands_from_json,
                                    dial_to_value)
@@ -151,6 +151,8 @@ class App:
             await self.source.stop()
         if name == "octopus":
             self.source = OctopusBLE(self.buf, address=address or None)
+        elif name == "octopus-usb":
+            self.source = OctopusUSB(self.buf, port=address or None)
         elif name == "replay":
             if not path:
                 raise ValueError("replay needs a recording path")
@@ -271,9 +273,25 @@ class App:
                 self.rec.features(row)
             await self.broadcast(row)
 
+    def _note_source_events(self):
+        """Mirror the source's disconnects into the session recording."""
+        src = self.source
+        if not src:
+            return
+        seen = getattr(self, "_events_seen", (None, 0))
+        if seen[0] is not src:
+            seen = (src, 0)
+        ev = list(src.events)
+        for t, what in ev[seen[1]:]:
+            self.rec.event("source_error", source=src.name, error=what, at=t)
+            print(f"[client] EEG source {src.name}: {what} — "
+                  f"{'reconnecting' if src.reconnect else 'stopped'}", flush=True)
+        self._events_seen = (src, len(ev))
+
     async def _playback_loop(self):
         while True:
             await asyncio.sleep(0.1)
+            self._note_source_events()
             played = self.audio.played
             while self.audio.anchors:
                 s, t = self.audio.anchors.pop(0)
