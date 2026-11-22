@@ -31,9 +31,16 @@ DEFAULT_PARAMS = {
     "seed": 0,
     "n_new": 8,               # measures written per take (context = 24 - n_new)
     "n_steps": 32,            # sampler steps; 16 = "draft"
-    "guidance": 3.0,          # signal CFG
-    "hist_guidance": 1.5,     # history guidance (1.0 = off, saves DiT passes)
-    "ctx_noise": 0.2,         # noise the frozen context is held at
+    # Conditioning, each with an on/off toggle; a toggle that is off keeps its
+    # strength value, so switching it back on restores the setting.
+    "guidance_on": True,      # signal CFG on; off = one plain conditional pass
+    "guidance": 3.0,          # signal CFG strength
+    "history_on": True,       # read the previous measures as context; off = each
+                              # take is generated from the signals alone
+    "hist_guidance_on": False,# history guidance on (only applies with history on);
+                              # off = the context is read but not amplified
+    "hist_guidance": 1.5,     # history guidance strength (1.0 = none)
+    "ctx_noise": 0.2,         # noise the context is held at (history on)
     # online
     "delay_s": 20.0,          # fixed brain->ear delay; the playout buffer
     "auto_draft": True,       # halve steps for a take that would arrive late
@@ -272,9 +279,20 @@ class Session:
 
     def _configure_track(self, tr):
         p = self.params
-        tr.guidance = float(p["guidance"])
-        tr.hist_guidance = float(p["hist_guidance"])
-        tr.ctx_noise = float(p["ctx_noise"])
+        tr.guidance = float(p["guidance"]) if p["guidance_on"] else 1.0
+        if p["history_on"]:
+            tr.hist_guidance = float(p["hist_guidance"]) if p["hist_guidance_on"] else 1.0
+            tr.ctx_noise = float(p["ctx_noise"])
+        else:
+            # No history: the context is held at t = 1.0 (pure noise) for the whole
+            # denoise, which is how this diffusion-forcing model spells "nothing
+            # known here" (the same input history guidance's negative leg uses), so
+            # the new measures depend only on their conditioning and the seed.
+            # History guidance has nothing to amplify, so 1.0 (no extra passes).
+            # loop_escape only raises ctx_noise and lowers hist_guidance, so it
+            # can't bring history back.
+            tr.hist_guidance = 1.0
+            tr.ctx_noise = 1.0
         tr.style_off = p["style_mode"] == "off"
         tr.bpm_follow = False
         tr.bpm_step = False

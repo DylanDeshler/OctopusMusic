@@ -45,8 +45,8 @@ REC_DIR = "recordings"
 GEN_DEFAULTS = {
     "preset": None, "style_b": None, "style_text": "", "style_axis": "",
     "style_axis_deg": 60.0, "seed": 0,
-    "n_new": 8, "n_steps": 32, "guidance": 3.0, "hist_guidance": 1.5,
-    "ctx_noise": 0.2, "delay_s": 20.0, "auto_draft": True, "lead_in_measures": 6,
+    "n_new": 8, "n_steps": 32, "guidance_on": True, "guidance": 3.0,
+    "history_on": True, "hist_guidance_on": False, "hist_guidance": 1.5, "ctx_noise": 0.2, "delay_s": 20.0, "auto_draft": True, "lead_in_measures": 6,
     "analyze_output": True,
     "mode": "locked", "smooth_s": 2.0, "glide": 0.5, "bpm_jitter": 0.0,
     "time_scale": 1.0, "offset_s": 0.0, "duration_s": None,

@@ -363,9 +363,19 @@ comfortable there. A faster GPU lowers the floor. Settings that lower it further
 
 - **measures/take**: fewer measures per take. Each take still costs a full
   24-measure DiT pass, so **RTF** rises; keep it under about 0.8.
-- **steps** 16 (draft) and **history guidance** 1.0: each skips DiT passes. With all
+- **steps** 16 (draft) and **history guidance** off: each skips DiT passes. With all
   DSP signals on, the window is well specified, so history matters less than it did in
   the Space's continuation mode.
+
+**Conditioning toggles** (Generation panel): *signal guidance* (CFG, with its strength),
+*history*, and with history on *history guidance* (with its strength) and *context
+noise*. A toggle that is off keeps its strength for when it comes back on. **History is
+on and history guidance off by default**: the model reads the previous measures as
+context, but doesn't amplify them with history guidance's extra passes. Turning history
+off holds the context measures at t = 1.0 (pure noise) for the whole denoise, which is
+how the model represents "nothing known here", so every take is generated from the
+signals and the seed alone; the cost is looser joins between takes.
+
 - **EEG avg s**, the feature window (2 s) and dial smoothing don't add delay in locked
   mode; they set how much EEG history each measure summarizes.
 
