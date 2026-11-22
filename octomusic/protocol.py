@@ -46,8 +46,23 @@ HEADER = struct.Struct("<4sIQII")
 DEFAULT_PORT = 8765
 
 
+def soft_limit(a: np.ndarray, knee: float = 0.85) -> np.ndarray:
+    """Memoryless soft clipper: identity below `knee`, then a tanh shoulder
+    that approaches 1.0 asymptotically. The model's output peaks a little
+    past full scale on ~0.2% of 10 ms windows; hard-clipping those at int16
+    conversion is audible as clicks/crackle, this rounds them instead."""
+    a = np.asarray(a, dtype=np.float32)
+    over = np.abs(a) > knee
+    if over.any():
+        head = 1.0 - knee
+        m = np.abs(a[over])
+        a = a.copy()
+        a[over] = np.sign(a[over]) * (knee + head * np.tanh((m - knee) / head))
+    return a
+
+
 def encode_audio(seq: int, start_sample: int, audio: np.ndarray, sr: int) -> bytes:
-    a = np.asarray(audio, dtype=np.float32).reshape(-1)
+    a = soft_limit(np.asarray(audio, dtype=np.float32).reshape(-1))
     pcm = (np.clip(a, -1.0, 1.0) * 32767.0).astype("<i2")
     return HEADER.pack(MAGIC, int(seq), int(start_sample), int(pcm.size), int(sr)) + pcm.tobytes()
 

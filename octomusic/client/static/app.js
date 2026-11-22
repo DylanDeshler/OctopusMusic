@@ -459,8 +459,10 @@ function updateStatus(s) {
   const a = s.audio;
   const delay = cfg ? cfg.gen.delay_s : 0;
   pill("p-play", a.preroll_s ? `pre-roll ${a.preroll_s.toFixed(1)} s` : a.rebuffering ? "RE-BUFFERING"
-    : `buffer ${a.buffered_s.toFixed(1)} s · ${a.rebuffers} rebuf`,
-    a.rebuffering ? "bad" : a.rebuffers ? "warn" : s.music_on ? "ok" : "");
+    : `buffer ${a.buffered_s.toFixed(1)} s · ${a.rebuffers} rebuf · ${a.glitches} glitch · ${a.join_jumps} seam`,
+    a.rebuffering ? "bad" : (a.rebuffers || a.glitches || a.join_jumps) ? "warn" : s.music_on ? "ok" : "");
+  $("p-play").title = `re-buffers: queue ran dry\nglitches: audio callback ran late (CoreAudio underflow)\n` +
+    `seams: chunk joins with a click-sized step (largest ${a.max_join})\nnear full scale in last chunk: ${(a.clipped * 100).toFixed(2)}% (soft-limited)`;
   pill("p-margin", `margin ${s.margin_s != null ? s.margin_s.toFixed(1) + " s" : "—"}${s.degraded ? " · " + s.degraded + " draft" : ""}`,
     s.margin_s == null ? "" : s.margin_s > 2 ? "ok" : s.margin_s > 0 ? "warn" : "bad");
   pill("p-mindelay", `min delay ${s.min_delay_s != null ? s.min_delay_s.toFixed(1) + " s" : "—"} (set ${delay})`,

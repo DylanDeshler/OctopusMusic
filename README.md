@@ -347,6 +347,25 @@ is the intended signal there.
 5. Back **online**, the `session_*` normalizers now use that recording's statistics.
    Set **manual** on an input to hear what it does on its own.
 
+## Audio quality checks
+
+- **Clipping:** the model's output peaks slightly past full scale on about 0.2% of
+  10 ms windows. Audio is **soft-limited** (a tanh shoulder above 0.85) before the
+  16-bit encode, rather than hard-clipped, which was audible as clicks. This happens
+  in `protocol.encode_audio`, on the GPU server.
+- **Playout pill** counts three things separately, so any remaining clicks can be
+  attributed:
+  - *rebuf*: the queue ran dry.
+  - *glitch*: the audio callback ran late (CoreAudio underflow).
+  - *seam*: a click-sized step where two chunks join.
+  
+  Hover it for the largest join step and how much of the audio is near full scale.
+  The output stream uses a large device buffer; with a 20 s delay, its ~100 ms
+  latency is irrelevant.
+- **Artifact hold:** dials freeze through artifacts for at most 3 s
+  (`Mapper.artifact_hold_s`). A longer run is treated as signal, so noisy pins can't
+  leave the music on one conditioning value indefinitely.
+
 ## Latency (online)
 
 The delay is a setting, not a side effect: brain→ear equals **delay** for every measure.

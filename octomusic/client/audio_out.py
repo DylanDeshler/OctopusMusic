@@ -68,14 +68,22 @@ class AudioOut:
         self._rebuffering = False
         self.anchors = []             # (sample16, wall time) events, drained by app
         self.rebuffers = 0
+        self.glitches = 0             # CoreAudio output underflows (callback late)
+        self.join_jumps = 0           # chunk joins with a sample-level step
+        self.max_join = 0.0
+        self.clipped = 0.0            # fraction of samples at the limiter's top
+        self._last_sample = None
 
     def open(self):
         import sounddevice as sd
         for sr in (SR, 48000):
             try:
+                # Big buffer on purpose: with a 20 s playout delay, 100 ms of
+                # device latency costs nothing, and it keeps the callback from
+                # missing deadlines while the EEG DSP holds the GIL.
                 self.stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32",
                                               device=self.device, callback=self._cb,
-                                              blocksize=0, latency="low")
+                                              blocksize=1024 * (sr // SR), latency="high")
                 self.stream.start()
                 self.out_sr, self.ratio = sr, sr // SR
                 self._up = _Upsampler(self.ratio) if self.ratio > 1 else None
@@ -99,6 +107,9 @@ class AudioOut:
             self.consumed_out = 0
             self.underruns = 0
             self.rebuffers = 0
+            self.glitches = self.join_jumps = 0
+            self.max_join = 0.0
+            self._last_sample = None
             self.gate_t = None
             self._playing = False
             self._rebuffering = False
@@ -114,6 +125,16 @@ class AudioOut:
 
     def push(self, start16: int, x: np.ndarray):
         x = np.asarray(x, np.float32)
+        if len(x):
+            self.clipped = float(np.mean(np.abs(x) > 0.97))
+            if self._last_sample is not None and self.next16 == start16:
+                # a click-sized step where two chunks meet (normal audio moves
+                # < ~0.1 per sample at 16 kHz except on hard transients)
+                step = abs(float(x[0]) - self._last_sample)
+                self.max_join = max(self.max_join, step)
+                if step > 0.25:
+                    self.join_jumps += 1
+            self._last_sample = float(x[-1])
         for f in self.listeners:
             f(start16, x)
         with self._lock:
@@ -128,7 +149,9 @@ class AudioOut:
             self._q.append(y)
             self._qlen += len(y)
 
-    def _cb(self, out, frames, time_info, _status):
+    def _cb(self, out, frames, time_info, status):
+        if status.output_underflow:
+            self.glitches += 1
         out.fill(0)
         now = time.time()
         with self._lock:
@@ -184,5 +207,7 @@ class AudioOut:
         wait = None if self.gate_t is None else max(0.0, self.gate_t - time.time())
         return {"sr": self.out_sr, "buffered_s": round(self.buffered_s, 2),
                 "underruns": self.underruns, "rebuffers": self.rebuffers,
-                "preroll_s": wait, "rebuffering": self._rebuffering, "played": self.played,
+                "preroll_s": wait, "rebuffering": self._rebuffering,
+                "glitches": self.glitches, "join_jumps": self.join_jumps,
+                "max_join": round(self.max_join, 3), "clipped": round(self.clipped, 4), "played": self.played,
                 "level": self.level, "error": self.error if self.stream is None else ""}

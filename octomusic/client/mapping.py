@@ -215,6 +215,8 @@ class Mapper:
         self.chroma = None
         self._key_idx = None
         self._last_t = None
+        self.artifact_hold_s = 3.0     # longest a run of artifacts may freeze the dials
+        self._art_since = None
 
     # ---- config ------------------------------------------------------------------
     def apply_preset(self, name):
@@ -250,6 +252,15 @@ class Mapper:
         t = time.time() if t is None else t
         dt = 0.25 if self._last_t is None else min(5.0, max(1e-3, t - self._last_t))
         self._last_t = t
+        # Hold through SHORT artifacts (a blink, a bump). A long run is not an
+        # artifact, it is the signal you have -- noisy dry pins, constant muscle
+        # tension -- and freezing the dials for minutes made the music static.
+        if artifact:
+            self._art_since = t if self._art_since is None else self._art_since
+            if t - self._art_since > self.artifact_hold_s:
+                artifact = False
+        else:
+            self._art_since = None
         if feats:
             names = set(feats) | {r["feature"] for r in self.routes.values()}
             for name in names:
