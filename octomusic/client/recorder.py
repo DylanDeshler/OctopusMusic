@@ -8,12 +8,16 @@ recordings/<stamp>/
     output.wav       the generated audio as streamed (16 kHz)
     config.json      the full client config at start (routes, dsp, params)
     events.jsonl     calibration marks, notes, parameter changes
+    labels.json      [[t0, t1, "label"], ...] seconds from the first EEG sample --
+                     what the evaluation harness and the Record tab read
+    meta.json        subject, placement, protocol, device, contact quality at start
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 
 import numpy as np
@@ -29,12 +33,17 @@ class Recorder:
         self._wav = None
         self._wav_next = None
         self.started = None
+        self._lock = threading.Lock()      # eeg() runs on the USB reader thread
+        self._t_first = None
+        self._segments = []                # closed [t0_abs, t1_abs, label]
+        self._open = None                  # (t0_abs, label) of the current label
+        self.meta = {}
 
     @property
     def active(self):
         return self.dir is not None
 
-    def start(self, config: dict, fs: float):
+    def start(self, config: dict, fs: float, meta: dict | None = None):
         import soundfile as sf
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.dir = os.path.join(self.root, stamp)
@@ -52,12 +61,70 @@ class Recorder:
         self.started = time.time()
         self._fs = fs
         self._n = 0
+        self._t_first = None
+        self._segments, self._open = [], None
+        self.meta = {"started": self.started, "fs": fs, **(meta or {})}
+        self._write_meta()
         return self.dir
 
+    # ---- labels -------------------------------------------------------------------
+    def label(self, lab: str | None):
+        """Switch the current label (None = unlabelled) at this instant."""
+        if not self.active:
+            return
+        now = time.time()
+        if self._open is not None:
+            t0, prev = self._open
+            if lab == prev:
+                return
+            if now - t0 > 0.05:
+                self._segments.append([t0, now, prev])
+        self._open = (now, lab) if lab else None
+        self.event("label", label=lab)
+        self._write_labels()
+
+    @property
+    def current_label(self):
+        return self._open[1] if self._open else None
+
+    def label_summary(self):
+        out = {}
+        segs = list(self._segments) + ([[self._open[0], time.time(), self._open[1]]] if self._open else [])
+        for t0, t1, lab in segs:
+            d = out.setdefault(lab, {"seconds": 0.0, "segments": 0})
+            d["seconds"] += t1 - t0
+            d["segments"] += 1
+        return out
+
+    def _write_labels(self):
+        if not self.dir:
+            return
+        base = self._t_first or self.started
+        segs = list(self._segments)
+        if self._open is not None:
+            segs.append([self._open[0], time.time(), self._open[1]])
+        rel = [[round(t0 - base, 3), round(t1 - base, 3), lab] for t0, t1, lab in segs]
+        with open(os.path.join(self.dir, "labels.json"), "w") as f:
+            json.dump(rel, f)
+
+    def _write_meta(self):
+        if self.dir:
+            with open(os.path.join(self.dir, "meta.json"), "w") as f:
+                f.write(protocol.dumps(self.meta))
+
+    def update_meta(self, **kw):
+        self.meta.update(kw)
+        self._write_meta()
+
     def stop(self):
-        for f in (self._eeg, self._feat, self._takes, self._events):
-            if f:
-                f.close()
+        if self.active:
+            self.label(None)
+            self._write_labels()
+            self.update_meta(stopped=time.time(), labels=self.label_summary())
+        with self._lock:
+            for f in (self._eeg, self._feat, self._takes, self._events):
+                if f:
+                    f.close()
         if self._wav:
             self._wav.close()
         d = self.dir
@@ -66,13 +133,16 @@ class Recorder:
         return d
 
     def eeg(self, block: np.ndarray):
-        if not self._eeg:
-            return
-        t = time.time()
-        n = len(block)
-        ts = t - (n - 1 - np.arange(n)) / self._fs
-        lines = [f"{ts[i]:.4f}," + ",".join(f"{v:.2f}" for v in block[i]) for i in range(n)]
-        self._eeg.write("\n".join(lines) + "\n")
+        with self._lock:
+            if not self._eeg:
+                return
+            t = time.time()
+            n = len(block)
+            ts = t - (n - 1 - np.arange(n)) / self._fs
+            if self._t_first is None:
+                self._t_first = float(ts[0])
+            lines = [f"{ts[i]:.4f}," + ",".join(f"{v:.2f}" for v in block[i]) for i in range(n)]
+            self._eeg.write("\n".join(lines) + "\n")
 
     def features(self, row: dict):
         if self._feat:

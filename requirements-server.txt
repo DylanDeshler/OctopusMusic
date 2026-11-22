@@ -11,3 +11,4 @@ soundfile
 huggingface_hub
 transformers
 sentencepiece
+openpyxl       # eval: reading PiEEG's xlsx datasets

@@ -82,3 +82,22 @@ table.stats tr.used td { color: var(--fg); background: #1b2030; }
 .dot.q-poor { background: #ff9a4a; } .dot.q-railed { background: #ff4d5e; }
 .dot.q-no-contact { background: #555b66; } .dot.q-none { background: #333; }
 h2 .small { text-transform: none; letter-spacing: 0; margin-left: 8px; font-weight: 400; }
+
+body.mode-record .online-only, body.mode-record .offline-only, body.mode-record .not-record { display: none !important; }
+body.mode-offline .live-only { display: none !important; }
+body:not(.mode-record) .record-only { display: none !important; }
+.instr { margin-top: 8px; padding: 18px; border-radius: 10px; background: #0c0e12; border: 1px solid var(--line); text-align: center; }
+.instr.block { border-color: #3c58a8; background: #111a33; }
+.instr.transition { border-color: #6a5a2c; }
+.instr-label { font-size: 34px; font-weight: 700; letter-spacing: .02em; }
+.instr-text { font-size: 16px; margin: 6px 0 10px; color: var(--fg); }
+.instr-count { font-size: 44px; font-variant-numeric: tabular-nums; color: var(--acc); }
+.label-btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.label-btns button { min-width: 7em; }
+.label-btns button.on { background: #2a3f78; border-color: #7aa2ff; }
+.label-btns kbd { color: var(--dim); margin-right: 6px; font-size: 11px; }
+table.sess { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.sess td, table.sess th { padding: 2px 5px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+table.sess tr.sel td { background: #1b2030; }
+.warn { color: var(--warn); }
+.report h3 { font-size: 12px; margin: 10px 0 4px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }

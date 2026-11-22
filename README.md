@@ -398,6 +398,81 @@ signals and the seed alone; the cost is looser joins between takes.
 - **EEG avg s**, the feature window (2 s) and dial smoothing don't add delay in locked
   mode; they set how much EEG history each measure summarizes.
 
+## Recording and labelling data (the **Record** tab)
+
+- **Guided protocols** cue you through labelled blocks: a large on-screen instruction,
+  a countdown, and an optional beep so you can follow with your eyes closed. Recording
+  starts and stops on its own. The protocols are alpha (eyes open/closed), muscle
+  (rest/clench), artifacts (rest/blinking), cognitive (rest/arithmetic) and a full
+  baseline covering all states.
+  - Each block is preceded by an unlabelled 3 s transition, so the moment of
+    switching doesn't smear into either state.
+  - Order is shuffled per repetition, never repeating a state back to back, so slow
+    drift can't masquerade as a state.
+  - Block lengths and repetitions are adjustable; the defaults give 20 s blocks and
+    several repetitions, which is what the search needs.
+- **Free labelling:** click a state or press its number key (0 = unlabelled) as you
+  switch. You can add your own states.
+- **Session details** (subject, placement, notes) are saved to `meta.json`, along with
+  the protocol, source, measured sample rate and per-channel quality at the start.
+- **Sessions → Analyze** shows, for that recording:
+  - per state: seconds, segments and artifact %;
+  - which features respond: variance explained (η²), AUC and Cohen's d for the best
+    pair of states, and per-state medians;
+  - whether the states can be decoded at all, the same number the search optimizes;
+  - warnings, e.g. a state with only one segment can't be cross-validated.
+- **Use as baseline** writes a session into the live normalizers: one state's
+  mean/std for `baseline`, two states' medians as the `range` anchors, and the whole
+  session as the `session_z` / `session_quantile` reference.
+- **Offline** opens the session in the Offline tab.
+
+Every session is a folder under `recordings/` (`eeg.csv`, `labels.json`, `meta.json`, …)
+that `python -m octomusic.eval.run --recordings recordings/<session> …` reads directly.
+To run the search on the GPU, sync the recordings over first:
+
+```bash
+rsync -av ~/Documents/research/music/OctopusMusic/recordings/ you@gpu-box:~/OctopusMusic/recordings/
+```
+
+## Finding good settings without listening (`octomusic.eval`)
+
+Runs on the GPU box, where the training data lives (`/data/binaries`, paths from
+`Jazz/neural/train_modern_fancy_dit_measures.py`).
+
+```bash
+python -m octomusic.eval.refstats --out eval_ref/refstats.npz      # once: what the model trained on
+python -m octomusic.eval.recordings fetch eval_data                # once: PiEEG's public recordings
+python -m octomusic.eval.run --refstats eval_ref/refstats.npz \
+    --recordings eval_data/pieeg16_alpha recordings/<your labelled sessions> \
+    --n-random 300 --top 6
+```
+
+| goal | measured as |
+|---|---|
+| **representative** | Can the labelled state be decoded from the conditioning (stage 1) and from the **audio** (stage 2)? Uses leave-one-segment-out balanced accuracy, best over 0–6 s lags. 0 = chance. |
+| **responsive** | `t50`: seconds for the dials to move halfway to a new state's level. Also band usage (dials neither pinned nor static). |
+| **reasonable quality** | Training-manifold kNN on the conditioning (from 99k validation measures, within songs); measure-to-measure motion vs real music; compliance (requested vs re-measured output); CLAP realism and motion in the model's **own** style space (shrinkage Fréchet distance ÷ the real-vs-real baseline); clipping, loudness and looping. |
+
+- **Stage 1** scores hundreds of configs on conditioning alone in seconds. It uses the
+  client's DSP + Mapper and the server's own `LiveConditioner`, so it scores exactly
+  what the model would receive.
+- **Stage 2** generates the top few, plus an *unconditional* and a *constant* baseline
+  (the "no information" floor), with the real model.
+- **Ranking:** quality limits are hard constraints; the best audibility among configs
+  passing them wins.
+- **Output:** `eval_runs/<stamp>/report.md` (recommendation and tables), `wav/` (the
+  listening shortlist) and `configs/eval_*.json`, which the UI's **Load config** opens
+  with their session statistics included.
+
+**Data.** Label your own sessions by typing the state into **Mark** as you change it
+("eyes open", "eyes closed", "clench", "rest"…); each note labels the time until the
+next. PiEEG's public Octopus 16 data is three 10 s files. Their own eyes-closed file
+shows no alpha increase, and one segment per class can't be cross-validated, so
+they're smoke tests only. The PiEEG-16 alpha test (a different board) has 16
+alternating 5 s blocks. Its separability came out near chance under every mapping
+tried, likely because 5 s blocks are close to the pipeline's ~3 s lag. Real
+labelled Octopus sessions, with blocks of 20 s or more, are what the search needs.
+
 ## Not yet verified
 
 - **The real-model path hasn't run yet.** Everything was exercised end to end against
@@ -408,6 +483,9 @@ signals and the seed alone; the cost is looser joins between takes.
 - **Headset I/O is verified, but not yet on a head.** USB and BLE both stream at
   250 Hz with no loss (see **Firmware**), but all signals so far are from a board on a
   desk.
+- **The eval harness has only run end to end locally** (mock model, and a stand-in
+  reference built from the 5 presets). `refstats.py` and stage 2's CLAP/compliance
+  paths will run for the first time on the GPU box.
 - **Measured so far** (mock backend with a simulated 2 s compute): brain→ear held at
   exactly the delay for every measure with 0 re-buffers. A too-short delay degraded as
   designed (early authoring plus draft steps). Offline mapped EEG time to song time with

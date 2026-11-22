@@ -12,6 +12,7 @@
   <div class="tabs">
     <button id="tab-online" class="tab active" data-mode="online" title="live EEG in, live audio out at a fixed delay">Online</button>
     <button id="tab-offline" class="tab" data-mode="offline" title="generate a piece from a recording">Offline</button>
+    <button id="tab-record" class="tab" data-mode="record" title="record and label EEG for baselines and the settings search">Record</button>
   </div>
   <div class="pills">
     <span class="pill" id="p-eeg" title="EEG source · measured sample rate · packet loss">EEG —</span>
@@ -33,6 +34,29 @@
 
 <main>
   <section class="col left">
+    <!-- ======================= RECORD workspace ======================= -->
+    <div class="card record-only">
+      <div class="card-h"><h2>Guided protocol</h2><span class="small" id="proto-note"></span></div>
+      <div class="row-inline">
+        <select id="proto-name"></select>
+        <label>block <input id="proto-block" type="number" min="5" max="120" style="width:4em"> s</label>
+        <label>× <input id="proto-reps" type="number" min="1" max="20" style="width:3.5em"></label>
+        <label title="shuffle state order each repetition (never the same twice in a row)"><input type="checkbox" id="proto-shuffle" checked> shuffle</label>
+        <label title="beep at every change, so you can follow with eyes closed"><input type="checkbox" id="proto-beep" checked> beep</label>
+        <span class="small" id="proto-len"></span>
+        <button id="b-proto" class="primary">▶ Start protocol</button>
+      </div>
+      <div class="instr" id="instr">
+        <div class="instr-label" id="instr-label">—</div>
+        <div class="instr-text" id="instr-text">Pick a protocol and press Start. The recording starts and stops on its own,
+          and every block is labelled for you. Put the board over Pz, part the hair, press it down, and get the
+          channel dots green first.</div>
+        <div class="instr-count" id="instr-count"></div>
+        <div class="progress"><i id="instr-prog"></i></div>
+        <div class="small" id="instr-next"></div>
+      </div>
+    </div>
+
     <!-- ======================= OFFLINE workspace ======================= -->
     <div class="card offline-only">
       <div class="card-h"><h2>Offline: generate from a recording</h2><span class="small" id="off-status"></span></div>
@@ -68,7 +92,7 @@
     </div>
 
     <!-- ======================= live EEG ======================= -->
-    <div class="card online-only">
+    <div class="card live-only">
       <div class="card-h">
         <h2>EEG <span class="small" id="q-summary" title="per-channel quality, PiEEG Contact Calibration style: hover a channel number for p-p / LINE / SNR"></span></h2>
         <div class="row-inline">
@@ -96,7 +120,7 @@
       <div class="row-inline small" id="dsp-controls"></div>
     </div>
 
-    <div class="grid2 online-only">
+    <div class="grid2 live-only">
       <div class="card">
         <div class="card-h"><h2>Spectrum</h2><span class="small" id="nch"></span></div>
         <canvas id="c-spec" height="260"></canvas>
@@ -109,7 +133,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card not-record">
       <div class="card-h">
         <h2>Output</h2>
         <span class="small">one band per measure: <b>bars</b> = conditioning sent · <b>dots</b> = what the model played · hatched = unconditional · red = speaker</span>
@@ -120,7 +144,35 @@
   </section>
 
   <section class="col right">
-    <div class="card">
+    <div class="card record-only">
+      <div class="card-h"><h2>Label as you go</h2><span class="small" id="lab-now"></span></div>
+      <div class="small">Free-form sessions: click a state (or press its number key) when you switch; <b>0</b> = unlabelled.
+        Recording starts automatically. Long blocks (≥ 20 s), each state several times.</div>
+      <div class="label-btns" id="label-btns"></div>
+      <div class="row-inline">
+        <input id="lab-custom" placeholder="add a state, e.g. 'music on'" style="flex:1">
+        <button id="b-lab-add">Add</button>
+        <button id="b-lab-stop">■ Stop recording</button>
+      </div>
+      <div class="small" id="lab-summary"></div>
+    </div>
+
+    <div class="card record-only">
+      <div class="card-h"><h2>Session details</h2><span class="small">saved with every recording (meta.json)</span></div>
+      <div class="ctl"><span>subject</span><input id="meta-subject" placeholder="name or id"><span></span></div>
+      <div class="ctl"><span>placement</span><select id="meta-placement">
+        <option>Pz</option><option>Oz</option><option>O1</option><option>O2</option><option>Cz</option><option>Fz</option>
+        <option>Fp1</option><option>Fp2</option><option>C3</option><option>C4</option><option>T7</option><option>T8</option><option>other</option></select><span></span></div>
+      <div class="ctl"><span>notes</span><input id="meta-notes" placeholder="hair, gel, posture, time of day…"><span></span></div>
+    </div>
+
+    <div class="card record-only">
+      <div class="card-h"><h2>Sessions</h2><span class="small">recordings/ · use for baselines and the settings search</span></div>
+      <div id="sessions"></div>
+      <div id="session-report"></div>
+    </div>
+
+    <div class="card not-record">
       <div class="card-h">
         <h2>Model inputs</h2>
         <label class="small">preset <select id="map-preset"></select> <button id="b-map-preset">Apply</button></label>
@@ -129,7 +181,7 @@
       <div id="routes"></div>
     </div>
 
-    <div class="card">
+    <div class="card not-record">
       <div class="card-h"><h2>Generation</h2><span class="small" id="backend"></span></div>
       <div id="gen"></div>
       <details>
@@ -150,7 +202,7 @@
       <div class="small" id="cal-table"></div>
     </div>
 
-    <div class="card online-only" id="synth-card">
+    <div class="card live-only" id="synth-card">
       <div class="card-h"><h2>Synthetic EEG</h2><span class="small">fake rhythms, µV</span></div>
       <div id="synth"></div>
     </div>

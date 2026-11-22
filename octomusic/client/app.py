@@ -30,6 +30,8 @@ from octomusic.client.audio_out import AudioOut
 from octomusic.client.dsp import DSP, FEATURES
 from octomusic.client.gpu_link import GPULink
 from octomusic.client.mapping import NORMS, PRESETS, SOURCES, Mapper
+from octomusic.client import protocols as PROTO
+from octomusic.client import sessions as SESS
 from octomusic.client.recorder import Recorder
 from octomusic.client.sources import EEGBuffer, OctopusBLE, OctopusUSB, Replay, Synthetic
 from octomusic.model_space import (DEFAULT_BANDS, NOTE_NAMES, SCALAR_TARGETS,
@@ -123,6 +125,10 @@ class App:
         self.job: OfflineJob | None = None
         self.last_offline = None       # {"dir", "url"}
         self.off_msgs = []             # last offline run's takes/waves, for page reloads
+        self.session_meta = {"subject": "", "placement": "Pz", "notes": ""}
+        self.protocol_state = None     # live guided-protocol state for the UI
+        self._protocol_task = None
+        self._sessions = {}            # name -> SessionAnalysis (cached for baseline)
         self.buf.listeners.append(self.rec.eeg)
         self.audio.listeners.append(self.rec.audio)
 
@@ -359,6 +365,9 @@ class App:
             "rtf": self.rtf, "compute_s": self.compute_s, "margin_s": self.margin_s,
             "min_delay_s": self.min_delay(), "degraded": self.degraded,
             "recording": self.rec.dir, "calibrating": self.calibrating,
+            "label": self.rec.current_label,
+            "label_summary": self.rec.label_summary() if self.rec.active else None,
+            "protocol": self.protocol_state,
         }
 
     def config(self):
@@ -379,6 +388,8 @@ class App:
             if os.path.isdir(CONFIG_DIR) else [],
             "recordings": recs[-50:],
             "offline_loaded": self.offline["path"] if self.offline else None,
+            "protocols": PROTO.listing(), "sessions": SESS.list_sessions(REC_DIR)[:40],
+            "session_meta": self.session_meta,
             "last_offline": self.last_offline,
         }
 
@@ -562,10 +573,42 @@ class App:
                 st.mean = st.var = None
         elif t == "record":
             if m["action"] == "start" and not self.rec.active:
-                self.rec.start({"routes": self.mapper.routes, "dsp": self.dsp.cfg,
-                                "gen": self.gen}, self.buf.measured_fs or self.buf.fs)
+                self._start_recording("free")
             elif m["action"] == "stop" and self.rec.active:
+                await self._stop_protocol()
                 self.rec.stop()
+        elif t == "session_meta":
+            self.session_meta.update({k: str(v) for k, v in (m.get("meta") or {}).items()
+                                      if k in ("subject", "placement", "notes")})
+            if self.rec.active:
+                self.rec.update_meta(**self.session_meta)
+        elif t == "rec_label":
+            if not self.rec.active:
+                self._start_recording("free")
+            self.rec.label(m.get("label") or None)
+        elif t == "protocol_start":
+            await self._stop_protocol()
+            self._protocol_task = asyncio.create_task(self._run_protocol(
+                m["name"], m.get("block_s"), m.get("reps"), bool(m.get("shuffle", True))))
+        elif t == "protocol_stop":
+            await self._stop_protocol()
+        elif t == "session_analyze":
+            await self.broadcast({"type": "session_busy", "name": m["name"]})
+            path = os.path.join(REC_DIR, m["name"])
+            sa = await asyncio.to_thread(SESS.SessionAnalysis, path, dict(self.dsp.cfg))
+            self._sessions[m["name"]] = sa
+            await self.broadcast(await asyncio.to_thread(sa.report))
+        elif t == "session_baseline":
+            sa = self._sessions.get(m["name"])
+            if sa is None:
+                sa = await asyncio.to_thread(SESS.SessionAnalysis, os.path.join(REC_DIR, m["name"]),
+                                             dict(self.dsp.cfg))
+                self._sessions[m["name"]] = sa
+            done = sa.apply_baseline(self.mapper, m.get("baseline"), m.get("low"), m.get("high"))
+            self.rec.event("baseline_applied", session=m["name"], **done)
+            await self.broadcast({"type": "info", "msg":
+                f"baseline from {m['name']}: baseline='{done['baseline']}', range "
+                f"'{done['low']}'→'{done['high']}', session stats for {done['features']} features"})
         elif t == "note":
             self.rec.event("note", text=m.get("text", ""))
         elif t == "audio":
@@ -586,6 +629,67 @@ class App:
             self.gen.update(d.get("gen", {}))
             await self.push_params()
         await self.broadcast({"type": "config", **self.config()})
+
+    # ---- recording / protocols ---------------------------------------------------------
+    def _start_recording(self, protocol_name, extra=None):
+        q = self.dsp.quality
+        meta = {**self.session_meta, "protocol": protocol_name,
+                "source": self.source.info() if self.source else None,
+                "measured_fs": self.buf.measured_fs,
+                "quality_at_start": None if q is None else {
+                    "status": q["status"].tolist(), "snr_db": np.round(q["snr"], 1).tolist(),
+                    "pp_uv": np.round(q["pp"], 1).tolist()},
+                **(extra or {})}
+        return self.rec.start({"routes": self.mapper.routes, "dsp": self.dsp.cfg, "gen": self.gen},
+                              self.buf.measured_fs or self.buf.fs, meta)
+
+    async def _stop_protocol(self):
+        if self._protocol_task and not self._protocol_task.done():
+            self._protocol_task.cancel()
+            try:
+                await self._protocol_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._protocol_task = None
+
+    async def _run_protocol(self, name, block_s=None, reps=None, shuffle=True):
+        steps = PROTO.schedule(name, block_s, reps, shuffle)
+        total = sum(st["seconds"] for st in steps)
+        started_here = not self.rec.active
+        if started_here:
+            self._start_recording(name, {"protocol_steps": steps})
+        else:
+            self.rec.update_meta(protocol=name, protocol_steps=steps)
+        d = self.rec.dir
+        t_begin = time.time()
+        cancelled = False
+        try:
+            for i, st in enumerate(steps):
+                self.rec.label(st["label"])
+                t_end = time.time() + st["seconds"]
+                while True:
+                    now = time.time()
+                    if now >= t_end:
+                        break
+                    self.protocol_state = {
+                        "name": name, "title": PROTO.PROTOCOLS[name]["title"], "step": i,
+                        "n_steps": len(steps), "kind": st["kind"], "label": st["label"],
+                        "next": st.get("next"), "instruction": st["instruction"],
+                        "left": round(t_end - now, 1), "total_left": round(total - (now - t_begin), 0),
+                        "progress": min(1.0, (now - t_begin) / total), "dir": d}
+                    await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            cancelled = True
+        self.rec.label(None)
+        if started_here and self.rec.active:
+            self.rec.stop()
+        self.protocol_state = {"name": name, "done": True, "cancelled": cancelled, "dir": d}
+        await self.broadcast({"type": "config", **self.config()})
+        if not cancelled and d:
+            name_d = os.path.basename(d)
+            sa = await asyncio.to_thread(SESS.SessionAnalysis, d, dict(self.dsp.cfg))
+            self._sessions[name_d] = sa
+            await self.broadcast(await asyncio.to_thread(sa.report))
 
     async def _calibrate(self, kind, seconds):
         """Hold a state for `seconds`, then summarize it (see Mapper.calibrate)."""

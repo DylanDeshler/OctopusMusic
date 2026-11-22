@@ -4,3 +4,6 @@ recordings/
 *.pyc
 firmware/octopus_usb/build/
 nmg/*.pt
+eval_runs/
+eval_ref/
+eval_data/_raw/

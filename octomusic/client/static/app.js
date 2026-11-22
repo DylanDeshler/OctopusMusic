@@ -72,6 +72,9 @@ function onMsg(m) {
       $("off-status").textContent = `generating → ${m.dir}`;
       break;
     case "offline_done": setOfflineResult(m); break;
+    case "session_report": renderReport(m); break;
+    case "session_busy": $("session-report").innerHTML = `<div class="small">analyzing ${m.name}…</div>`; break;
+    case "info": flash(m.msg); break;
     case "error": flash(m.msg); break;
   }
 }
@@ -162,7 +165,7 @@ function refresh() {
   $("synth-card").classList.toggle("hidden", !cfg.synth);
   $("backend").textContent = cfg.backend ? `${cfg.backend} on ${cfg.device}` : "server not connected";
   if (cfg.last_offline && !$("off-audio").getAttribute("src")) setOfflineResult(cfg.last_offline);
-  renderCal(); renderStats();
+  renderCal(); renderStats(); refreshRecord();
 }
 
 // ---------------------------------------------------------------- build UI
@@ -171,7 +174,7 @@ function build() {
   bindings.length = 0; visRules.length = 0;
   const dl = $("feat-list"); dl.innerHTML = "";
   for (const [k, d] of Object.entries(cfg.features)) dl.append(el("option", { value: k }, d));
-  buildChannels(); buildDSP(); buildRoutes(); buildGen(); buildBands(); buildSynth(); wireButtons();
+  buildChannels(); buildDSP(); buildRoutes(); buildGen(); buildBands(); buildSynth(); wireButtons(); buildRecord();
   refresh();
 }
 
@@ -406,6 +409,163 @@ function renderStats() {
   $("off-stats").innerHTML = ""; $("off-stats").append(t);
 }
 
+// ---------------------------------------------------------------- record tab
+let customLabels = JSON.parse(localStorage.getItem("om-labels") || "[]");
+let lastStep = null, audioCtx = null, selectedSession = null, lastReport = null;
+function beep(freq = 880, ms = 160, times = 1) {
+  if (!$("proto-beep").checked) return;
+  try {
+    audioCtx = audioCtx || new AudioContext();
+    for (let k = 0; k < times; k++) {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + k * (ms / 1000 + 0.08);
+      o.frequency.value = freq; o.connect(g); g.connect(audioCtx.destination);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+      o.start(t); o.stop(t + ms / 1000 + 0.02);
+    }
+  } catch (e) { /* audio is optional */ }
+}
+function allLabels() {
+  const s = new Set();
+  for (const p of Object.values(cfg.protocols || {})) for (const l of p.labels) s.add(l);
+  for (const l of customLabels) s.add(l);
+  return [...s];
+}
+function buildRecord() {
+  const sel = $("proto-name");
+  sel.innerHTML = "";
+  for (const [k, p] of Object.entries(cfg.protocols || {})) sel.append(el("option", { value: k }, p.title));
+  const fill = () => {
+    const p = cfg.protocols[sel.value]; if (!p) return;
+    $("proto-block").value = p.block_s; $("proto-reps").value = p.reps; $("proto-note").textContent = p.note; updLen();
+  };
+  const updLen = () => {
+    const p = cfg.protocols[sel.value]; if (!p) return;
+    const sec = 8 + (+$("proto-reps").value) * p.labels.length * ((+$("proto-block").value) + 3);
+    $("proto-len").textContent = `≈ ${(sec / 60).toFixed(1)} min · ${p.labels.join(" / ")}`;
+  };
+  sel.onchange = fill; $("proto-block").oninput = updLen; $("proto-reps").oninput = updLen;
+  if (!sel.dataset.init) { sel.value = "alpha"; sel.dataset.init = "1"; }
+  fill();
+  $("b-proto").onclick = () => {
+    const running = lastStatus && lastStatus.protocol && !lastStatus.protocol.done;
+    if (running) { send({ type: "protocol_stop" }); return; }
+    audioCtx = audioCtx || new AudioContext();       // user gesture: allow beeps
+    send({ type: "protocol_start", name: sel.value, block_s: +$("proto-block").value,
+           reps: +$("proto-reps").value, shuffle: $("proto-shuffle").checked });
+  };
+  $("b-lab-add").onclick = () => {
+    const v = $("lab-custom").value.trim().toLowerCase(); if (!v) return;
+    if (!customLabels.includes(v)) customLabels.push(v);
+    localStorage.setItem("om-labels", JSON.stringify(customLabels)); $("lab-custom").value = ""; renderLabelButtons();
+  };
+  $("b-lab-stop").onclick = () => send({ type: "record", action: "stop" });
+  const m = cfg.session_meta || {};
+  for (const k of ["subject", "placement", "notes"]) {
+    const i = $("meta-" + k); i.value = m[k] || (k === "placement" ? "Pz" : "");
+    i.onchange = () => send({ type: "session_meta", meta: { [k]: i.value } });
+  }
+  renderLabelButtons();
+}
+function renderLabelButtons() {
+  const box = $("label-btns"); box.innerHTML = "";
+  const none = el("button", { "data-label": "" }, el("kbd", {}, "0"), "unlabelled");
+  none.onclick = () => send({ type: "rec_label", label: null });
+  box.append(none);
+  allLabels().forEach((l, i) => {
+    const b = el("button", { "data-label": l }, el("kbd", {}, i < 9 ? String(i + 1) : ""), l);
+    b.onclick = () => send({ type: "rec_label", label: l });
+    box.append(b);
+  });
+}
+document.addEventListener("keydown", (e) => {
+  if (uiMode !== "record" || ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+  if (!/^[0-9]$/.test(e.key)) return;
+  const k = +e.key;
+  if (k === 0) send({ type: "rec_label", label: null });
+  else { const l = allLabels()[k - 1]; if (l) send({ type: "rec_label", label: l }); }
+});
+function refreshRecord() {
+  if (!cfg || !cfg.sessions) return;
+  const box = $("sessions");
+  const t = el("table", { class: "sess" }, el("tr", {}, ...["session", "protocol", "subject · placement", "length", "labelled", ""].map((h) => el("th", {}, h))));
+  for (const ss of cfg.sessions) {
+    const labs = Object.entries(ss.labels).map(([k, v]) => `${k} ${v.seconds.toFixed(0)}s×${v.segments}`).join(", ") || "—";
+    const an = el("button", {}, "Analyze"); an.onclick = () => { selectedSession = ss.name; send({ type: "session_analyze", name: ss.name }); };
+    const off = el("button", { title: "open in the Offline tab" }, "Offline"); off.onclick = () => {
+      $("off-rec").value = ss.name; $("off-rec").dataset.touched = "1"; setMode("offline");
+      send({ type: "offline_analyze", path: ss.name });
+    };
+    t.append(el("tr", { class: ss.name === selectedSession ? "sel" : "" }, el("td", {}, ss.name), el("td", {}, ss.protocol || "—"),
+      el("td", {}, [ss.subject, ss.placement].filter(Boolean).join(" · ") || "—"), el("td", {}, `${Math.round(ss.duration_s)}s`),
+      el("td", { class: "small" }, labs), el("td", {}, an, off)));
+  }
+  box.innerHTML = ""; box.append(cfg.sessions.length ? t : el("div", { class: "small" }, "No recordings yet."));
+}
+function renderReport(r) {
+  lastReport = r;
+  const box = $("session-report"); box.innerHTML = "";
+  const div = el("div", { class: "report" });
+  const dec = r.decode && r.decode.norm != null
+    ? `states decodable from features: <b>${(r.decode.bacc * 100).toFixed(0)}%</b> balanced accuracy (chance ${(r.decode.chance * 100).toFixed(0)}%, best lag ${r.decode.lag_s}s)`
+    : "states not decodable yet (need ≥ 2 labelled segments per state)";
+  div.innerHTML = `<h3>${r.name} — ${Math.round(r.duration_s)}s, ${r.artifact_pct}% artifacts</h3><div class="small">${dec}</div>` +
+    (r.warnings.length ? `<div class="small warn">⚠ ${r.warnings.join("<br>⚠ ")}</div>` : "");
+  // per label
+  const pl = el("table", { class: "sess" }, el("tr", {}, ...["state", "seconds", "segments", "artifacts"].map((h) => el("th", {}, h))));
+  for (const [c, d] of Object.entries(r.per_label)) pl.append(el("tr", {}, el("td", {}, c), el("td", {}, d.seconds.toFixed(0)),
+    el("td", {}, d.segments), el("td", { class: d.artifact_pct > 30 ? "warn" : "" }, d.artifact_pct + "%")));
+  div.append(el("h3", {}, "States"), pl);
+  // features
+  const ft = el("table", { class: "sess" }, el("tr", {}, el("th", {}, "feature"), el("th", { title: "share of the feature's variance explained by the state" }, "η²"),
+    el("th", {}, "AUC"), el("th", {}, "best pair"), el("th", { title: "Cohen's d for that pair" }, "d"), ...r.classes.map((c) => el("th", {}, c))));
+  for (const f of r.features.slice(0, 14)) {
+    ft.append(el("tr", {}, el("td", { title: (cfg.features || {})[f.feature] || "" }, f.feature), el("td", {}, f.eta2.toFixed(2)),
+      el("td", {}, f.auc.toFixed(2)), el("td", { class: "small" }, f.pair || "—"), el("td", {}, f.d.toFixed(1)),
+      ...r.classes.map((c) => el("td", {}, r.per_label[c].medians[f.feature] != null ? fmtNum(r.per_label[c].medians[f.feature]) : "—"))));
+  }
+  div.append(el("h3", {}, "Which features respond (most first)"), ft);
+  // baseline
+  const opts = [["", "—"], ...r.classes.map((c) => [c, c])];
+  const mk = (id, label, guess) => {
+    const s = el("select", { id }); for (const [v, t] of opts) s.append(el("option", { value: v }, t)); s.value = guess || "";
+    return el("div", { class: "ctl" }, el("span", {}, label), s, el("span", {}));
+  };
+  const guess = (want) => r.classes.find((c) => want.some((w) => c.includes(w))) || "";
+  const apply = el("button", { class: "primary" }, "Use as baseline");
+  apply.onclick = () => send({ type: "session_baseline", name: r.name, baseline: $("bl-base").value || null,
+                               low: $("bl-low").value || null, high: $("bl-high").value || null });
+  div.append(el("h3", {}, "Use as baseline"),
+    el("div", { class: "small" }, "Sets the 'baseline' normalizer (mean/std of one state), the 'range' normalizer's anchors (low → high), and the reference for session_z / session_quantile — for every feature."),
+    mk("bl-base", "baseline state", guess(["rest", "open"])), mk("bl-low", "range low", guess(["open", "rest"])),
+    mk("bl-high", "range high", guess(["closed", "clench"])), apply);
+  box.append(div);
+}
+function updateRecordStatus(s) {
+  const p = s.protocol, box = $("instr");
+  const running = p && !p.done;
+  $("b-proto").textContent = running ? "■ Stop protocol" : "▶ Start protocol";
+  $("b-proto").classList.toggle("on", !!running);
+  if (running) {
+    box.className = "instr " + p.kind;
+    $("instr-label").textContent = p.kind === "block" ? p.label : p.kind === "setup" ? "get ready" : `next: ${p.next}`;
+    $("instr-text").textContent = p.instruction;
+    $("instr-count").textContent = Math.ceil(p.left);
+    $("instr-prog").style.width = `${(p.progress * 100).toFixed(1)}%`;
+    $("instr-next").textContent = `step ${p.step + 1}/${p.n_steps} · ${Math.round(p.total_left)}s left · recording → ${p.dir}`;
+    if (lastStep !== p.step) { if (lastStep !== null) beep(p.kind === "block" ? 880 : 660); lastStep = p.step; }
+  } else if (p && p.done && lastStep !== null) {
+    beep(990, 140, 2); lastStep = null;
+    box.className = "instr";
+    $("instr-label").textContent = p.cancelled ? "stopped" : "done";
+    $("instr-text").textContent = p.cancelled ? "Protocol stopped; what was recorded is saved." : "Saved. The analysis appears under Sessions.";
+    $("instr-count").textContent = ""; $("instr-prog").style.width = "100%"; $("instr-next").textContent = p.dir || "";
+  }
+  $("lab-now").textContent = s.recording ? `● recording · current: ${s.label || "unlabelled"}` : "not recording";
+  for (const b of document.querySelectorAll("#label-btns button")) b.classList.toggle("on", (b.dataset.label || null) === (s.label || null) && !!s.recording);
+  $("lab-summary").textContent = s.label_summary ? Object.entries(s.label_summary).map(([k, v]) => `${k}: ${v.seconds.toFixed(0)}s × ${v.segments}`).join(" · ") : "";
+}
+
 // ---------------------------------------------------------------- live readouts
 function unitFmt(t, v) {
   if (t === "bpm") return `${v.toFixed(1)} bpm`;
@@ -475,6 +635,7 @@ function updateStatus(s) {
   $("b-rec").textContent = s.recording ? "■ Stop recording" : "● Record";
   $("b-rec").classList.toggle("on", !!s.recording);
   $("rec-dir").textContent = s.recording ? `→ ${s.recording}` : "";
+  if (cfg) updateRecordStatus(s);
   $("cal-status").textContent = s.calibrating ? `recording ${s.calibrating.kind}… ${s.calibrating.left}s — hold the state` : "";
   if (s.run_mode === "offline" && s.progress != null) $("off-prog").style.width = `${(s.progress * 100).toFixed(1)}%`;
   if (cfg) {
@@ -721,13 +882,14 @@ function drawOffline() {
 }
 function frame() {
   try {
-    if (uiMode === "online") { drawEEG(); drawSpec(); drawDials(); } else drawOffline();
-    drawOut();
+    if (uiMode === "offline") drawOffline(); else { drawEEG(); drawSpec(); drawDials(); }
+    if (uiMode !== "record") drawOut();
   } catch (e) { console.error(e); }
   if (!built && cfg) build();
   requestAnimationFrame(frame);
 }
-setMode(location.hash === "#offline" ? "offline" : "online");
-window.addEventListener("hashchange", () => setMode(location.hash === "#offline" ? "offline" : "online"));
+const modeFromHash = () => (["#offline", "#record"].includes(location.hash) ? location.hash.slice(1) : "online");
+setMode(modeFromHash());
+window.addEventListener("hashchange", () => setMode(modeFromHash()));
 connect();
 requestAnimationFrame(frame);

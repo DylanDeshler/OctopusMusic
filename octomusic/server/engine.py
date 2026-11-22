@@ -465,7 +465,9 @@ class Session:
             "compute_s": compute, "audio_s": len(chunk) / sr, "first": first,
             "active": list(self.params["active"]),
             "diag": (getattr(tr, "diag", "") or "")[-600:],
-            "anchor": self.anchor, **extra,
+            "anchor": self.anchor,
+            "loop_cos": float(getattr(tr, "loop_cos", 0.0) or 0.0),
+            "loop_period": int(getattr(tr, "loop_period", 0) or 0), **extra,
         })
         self.send(("audio", self.seq, start, chunk, sr))
         if self.params.get("analyze_output") and not self.E.mock:

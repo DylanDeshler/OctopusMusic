@@ -353,7 +353,11 @@ class Mapper:
         return {
             "routes": self.routes,
             "calib": {n: {"base": s.base, "anchors": s.anchors,
-                          "session": None if s.session is None else s.session[:2]}
+                          # mean, std and a 101-point quantile grid: enough for
+                          # session_z and session_quantile to work after a reload
+                          "session": None if s.session is None else
+                          [s.session[0], s.session[1],
+                           np.quantile(s.session[2], np.linspace(0, 1, 101)).tolist()]}
                       for n, s in self.stats.items()
                       if s.base or s.anchors or s.session is not None},
         }
@@ -365,6 +369,9 @@ class Mapper:
             st = self.stats.setdefault(n, FeatureStats())
             st.base = tuple(c["base"]) if c.get("base") else None
             st.anchors = dict(c.get("anchors") or {})
+            ses = c.get("session")
+            if ses and len(ses) >= 3 and ses[2]:
+                st.session = (float(ses[0]), float(ses[1]), np.asarray(ses[2], float))
 
     def clone_for_offline(self):
         """A fresh Mapper with this one's routes and calibrations, but no
