@@ -1,0 +1,13 @@
+# GPU box: python -m octomusic.server   (plus the Neural_Music_Generator checkout on NMG_PATH)
+aiohttp
+numpy
+# everything the model code needs -- same as Neural_Music_Generator/requirements.txt minus gradio/spaces:
+torch
+torchaudio
+scipy
+einops
+librosa
+soundfile
+huggingface_hub
+transformers
+sentencepiece

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OctopusMusic</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">🐙 OctopusMusic</div>
+  <div class="tabs">
+    <button id="tab-online" class="tab active" data-mode="online" title="live EEG in, live audio out at a fixed delay">Online</button>
+    <button id="tab-offline" class="tab" data-mode="offline" title="generate a piece from a recording">Offline</button>
+  </div>
+  <div class="pills">
+    <span class="pill" id="p-eeg" title="EEG source · measured sample rate · packet loss">EEG —</span>
+    <span class="pill" id="p-link" title="GPU link · round trip">GPU —</span>
+    <span class="pill" id="p-server" title="server state">server —</span>
+    <span class="pill online-only" id="p-play" title="pre-roll countdown, then audio queued on this laptop · re-buffers">playout —</span>
+    <span class="pill online-only" id="p-margin" title="for the last take: seconds between its audio arriving and it being needed. Negative = it arrived late and playback had to re-buffer.">margin —</span>
+    <span class="pill online-only" id="p-mindelay" title="smallest delay that can be smooth: take length + compute + 2 s. Keep the delay above this.">min delay —</span>
+    <span class="pill" id="p-rtf" title="compute time / audio time for the last take. Must stay under 1.">RTF —</span>
+    <span class="pill online-only" id="p-lat" title="measured: from the end of the EEG a measure was authored from to that measure reaching the speaker. Should equal the delay.">brain→ear —</span>
+  </div>
+  <div class="actions">
+    <button id="b-music" class="primary online-only">▶ Start</button>
+    <button id="b-rec" title="record raw EEG, features, takes and output for offline work">● Record</button>
+    <label class="vol">🔊 <input id="vol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+  </div>
+</header>
+<div id="msg" class="msg"></div>
+
+<main>
+  <section class="col left">
+    <!-- ======================= OFFLINE workspace ======================= -->
+    <div class="card offline-only">
+      <div class="card-h"><h2>Offline: generate from a recording</h2><span class="small" id="off-status"></span></div>
+      <div class="row-inline">
+        <select id="off-rec"></select>
+        <label>from <input id="off-start" type="number" value="0" min="0" style="width:5em"> s</label>
+        <label>length <input id="off-dur" type="number" placeholder="all" min="5" style="width:5em"> s</label>
+        <button id="b-off-analyze" title="features + whole-session stats; enables session_z / session_quantile">Analyze</button>
+        <button id="b-off-remap" title="recompute the dial preview with the current model-input settings">Re-map</button>
+        <span class="small">auto re-map <input type="checkbox" id="off-auto" checked></span>
+      </div>
+      <div class="row-inline">
+        <label>time scale <input id="off-scale" type="number" value="1" step="0.25" min="0.1" style="width:4.5em"></label>
+        <span class="small">seconds of EEG per second of music</span>
+        <label>music length <input id="off-gendur" type="number" placeholder="whole" style="width:5em"> s</label>
+        <button id="b-off-gen" class="primary">Generate</button>
+        <button id="b-off-stop">Stop</button>
+      </div>
+      <div class="progress"><i id="off-prog"></i></div>
+      <div class="row-inline">
+        <audio id="off-audio" controls preload="auto" style="flex:1"></audio>
+        <a id="off-link" class="small" target="_blank"></a>
+      </div>
+      <div class="card-h" style="margin-top:6px">
+        <span class="small">whole session · lines = dials sent to the model · shaded = artifacts · grey = feature</span>
+        <label class="small">overlay feature <select id="off-feat"></select></label>
+      </div>
+      <canvas id="c-off" height="230"></canvas>
+      <details>
+        <summary>Session stats (artifact-free hops) — use these to set fixed lo/hi or sanity-check normalizers</summary>
+        <div id="off-stats" class="small"></div>
+      </details>
+    </div>
+
+    <!-- ======================= live EEG ======================= -->
+    <div class="card online-only">
+      <div class="card-h">
+        <h2>EEG</h2>
+        <div class="row-inline">
+          <select id="src-name">
+            <option value="octopus">Octopus 16 (BLE)</option>
+            <option value="synthetic">Synthetic</option>
+            <option value="replay">Replay recording (live)</option>
+          </select>
+          <select id="src-path" class="hidden"></select>
+          <button id="b-src">Connect</button>
+          <label>scale <select id="eeg-scale">
+            <option>10</option><option selected>25</option><option>50</option><option>100</option><option>250</option>
+          </select> µV</label>
+          <label>window <select id="eeg-win"><option>5</option><option selected>10</option><option>20</option></select> s</label>
+        </div>
+      </div>
+      <div class="eeg-wrap">
+        <div id="chan-list" class="chan-list"></div>
+        <canvas id="c-eeg" height="400"></canvas>
+      </div>
+      <div class="row-inline small" id="dsp-controls"></div>
+    </div>
+
+    <div class="grid2 online-only">
+      <div class="card">
+        <div class="card-h"><h2>Spectrum</h2><span class="small" id="nch"></span></div>
+        <canvas id="c-spec" height="190"></canvas>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Dials (last 2 min)</h2><span class="small">what the EEG is asking for</span></div>
+        <canvas id="c-dials" height="190"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2>Output</h2>
+        <span class="small">one band per measure: <b>bars</b> = conditioning sent · <b>dots</b> = what the model played · hatched = unconditional · red = speaker</span>
+      </div>
+      <canvas id="c-out" height="330"></canvas>
+      <div class="small mono" id="diag"></div>
+    </div>
+  </section>
+
+  <section class="col right">
+    <div class="card">
+      <div class="card-h">
+        <h2>Model inputs</h2>
+        <label class="small">preset <select id="map-preset"></select> <button id="b-map-preset">Apply</button></label>
+      </div>
+      <div class="small" style="margin-bottom:4px">each of the model's 7 inputs: what drives it, or <b>off</b> = left unconditional (the model makes it up)</div>
+      <div id="routes"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>Generation</h2><span class="small" id="backend"></span></div>
+      <div id="gen"></div>
+      <details>
+        <summary>Signal bands (model units the dial spans)</summary>
+        <div id="bands"></div>
+      </details>
+    </div>
+
+    <div class="card online-only">
+      <div class="card-h"><h2>Calibration</h2><span class="small" id="cal-status"></span></div>
+      <div class="row-inline">
+        <label>hold for <input id="cal-sec" type="number" value="30" min="5" max="300" style="width:4em"> s</label>
+        <button data-cal="baseline" title="mean/std for the 'baseline' normalizer">Baseline</button>
+        <button data-cal="low" title="anchor u=0 for the 'range' normalizer, e.g. eyes open">Low anchor</button>
+        <button data-cal="high" title="anchor u=1 for the 'range' normalizer, e.g. eyes closed">High anchor</button>
+        <button id="b-resetnorm" title="forget adaptive running mean/std">Reset adaptive</button>
+      </div>
+      <div class="small" id="cal-table"></div>
+    </div>
+
+    <div class="card online-only" id="synth-card">
+      <div class="card-h"><h2>Synthetic EEG</h2><span class="small">fake rhythms, µV</span></div>
+      <div id="synth"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>Session</h2><span class="small" id="rec-dir"></span></div>
+      <div class="row-inline">
+        <input id="note" placeholder="note for the recording (e.g. 'eyes closed now')" style="flex:1">
+        <button id="b-note">Mark</button>
+      </div>
+      <div class="row-inline">
+        <input id="cfg-name" placeholder="config name" style="width:10em">
+        <button id="b-save">Save config</button>
+        <select id="cfg-list"></select>
+        <button id="b-load">Load</button>
+      </div>
+    </div>
+  </section>
+</main>
+<datalist id="feat-list"></datalist>
+<script src="/static/app.js"></script>
+</body>
+</html>

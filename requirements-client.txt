@@ -1,0 +1,7 @@
+# laptop: python -m octomusic.client
+numpy
+scipy
+aiohttp
+bleak          # Octopus 16 over Bluetooth LE
+sounddevice    # speaker output (PortAudio)
+soundfile      # session recordings
