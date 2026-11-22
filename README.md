@@ -177,6 +177,43 @@ Opening the port resets the chip. The client waits for boot, then sends `S`.
 | `octomusic/client/recorder.py` | Session recording: raw EEG, features, dials, takes and output wav. |
 | `octomusic/client/app.py`, `static/` | Orchestrator and web UI. |
 
+### Signal processing (PiEEG's published defaults)
+
+PiEEG's browser SDK and dashboard (`pieeg-club/PiEEG-docs`, `javascript-sdk.mdx`)
+filter with **Hampel spike removal (window 5, 3σ) → Butterworth band-pass 1–40 Hz,
+order 5 → notch at mains (Q 30)**. That is the client's *clean* stream: the traces and
+every EEG feature use it. A separate *wide* stream (1 Hz high-pass + notch only) keeps
+the EMG (65–95 Hz) and gamma features, which the 40 Hz cut and the spike removal
+would otherwise destroy. Live and offline run the identical filter bank; the output
+was bit-for-bit equal in testing. All stages are adjustable under the EEG traces.
+
+**Channel quality** follows PiEEG's *Contact Calibration*:
+- Each channel is rated by peak-to-peak µV, LINE (mains pickup) and SNR (dB), giving
+  a status of good · fair · poor · railed · no contact. PiEEG doesn't publish its
+  thresholds, so ours are constants at the top of `dsp.py`.
+- Hover a channel number for its numbers.
+- Only good and fair channels feed the features (median PSD across them).
+
+**Their placement advice:**
+- Put the board over **Pz** or the back of the head for alpha.
+- Part the hair and press the board straight down.
+- Power it from a power bank only; a strong 50/60 Hz hum means something is on mains.
+
+**New features:** PiEEG's ratios `focus_idx` β/(β+θ), `relax_idx` α/(α+β) and
+`meditation_idx` (θ+α)/total. All are bounded 0–1, which makes them easy to map. Their
+docs are explicit that these are plain band-power ratios, not validated measures.
+
+### Seeing what goes in and what comes out
+
+- **In → Out panel:** one lane per driven model input. The dashed line is the feature
+  coming in (scaled to its range over the window, which is printed on the lane). The
+  solid line is the dial going out to the model.
+- **Overlay on the EEG traces** (*overlay: in + out / features in / dials out*): the
+  same curves drawn over the raw signals on the same time axis, so a blink or clench
+  in the traces lines up with what it did to each feature and dial.
+- **Output panel:** per measure, the conditioning actually sent versus what the model
+  played.
+
 ### Octopus 16 facts the code relies on
 
 These come from `pieeg-club/Octopus_16` and `hello_world_octopus_16`:

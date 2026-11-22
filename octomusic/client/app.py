@@ -100,13 +100,15 @@ class App:
         self.gen = dict(GEN_DEFAULTS)
         self.source = None
         self._initial_source = (source, replay_path, ble_address)
-        self.ui_clients: set = set()
+        self.ui_clients: dict = {}       # ws -> outgoing queue
+        self._ui_drops: dict = {}
         self.server_state = "idle"
         self.server_msg = ""
         self.server_progress = None
         self.run_mode = None           # None | "online" | "offline"
         self.takes = deque(maxlen=64)
         self.waves = deque(maxlen=400)
+        self.feat_hist = deque(maxlen=int(120 / FEATURE_HOP_S))   # replayed to new pages
         self._pending_lat = deque()    # (start_sample, eeg_t)
         self.latency_s = None
         self.rtf = None
@@ -160,7 +162,7 @@ class App:
         else:
             self.source = Synthetic(self.buf)
         self.buf.reset_stats()
-        self.dsp.zi = None
+        self.dsp.reset()
         self.source.start()
 
     # ---- server traffic -----------------------------------------------------------
@@ -215,6 +217,11 @@ class App:
                 self.rec.take(m)
         elif t == "link":
             self.server_state = "disconnected"
+            if self.run_mode:
+                # the server ends the session when its client disconnects
+                self.run_mode = None
+                if self.job:
+                    self._finish_job()
         asyncio.create_task(self.broadcast(m))
 
     def _finish_job(self):
@@ -250,7 +257,7 @@ class App:
             await asyncio.sleep(0.04)
             raw, self._cursor = self.buf.read_since(self._cursor)
             if len(raw):
-                _, disp = self.dsp.process(raw)
+                disp = self.dsp.process(raw)
                 self._eeg_out.append(disp)
             now = time.time()
             if now < next_feat:
@@ -267,6 +274,7 @@ class App:
                    "art_frac": art, "nch": nch, "dials": dials, "z": self.mapper.z,
                    "vals": vals, "chroma": None if chroma is None else np.round(chroma, 3)}
             if feats:
+                self.feat_hist.append(row)
                 await self.link.send({"type": "dials", "t": now, "values": dials,
                                       "chroma": None if chroma is None
                                       else [round(float(c), 4) for c in chroma]})
@@ -339,6 +347,11 @@ class App:
             "loss_pct": 100.0 * self.buf.lost / max(1, rec + self.buf.lost),
             "contact": np.round(self.dsp.contact_rms, 1).tolist(),
             "good": self.dsp.good.tolist(), "used": self.dsp.used_channels().tolist(),
+            "quality": None if self.dsp.quality is None else {
+                "status": self.dsp.quality["status"].tolist(),
+                "pp": np.round(self.dsp.quality["pp"], 1).tolist(),
+                "line": np.round(self.dsp.quality["line"], 2).tolist(),
+                "snr": np.round(self.dsp.quality["snr"], 1).tolist()},
             "link": self.link.info(), "audio": self.audio.info(),
             "server_state": self.server_state, "server_msg": self.server_msg,
             "progress": self.server_progress, "run_mode": self.run_mode,
@@ -370,19 +383,41 @@ class App:
         }
 
     async def broadcast(self, obj):
+        """Queue a message for every open page. NEVER awaits the network: the
+        DSP loop calls this, and a page that stops reading (background tab,
+        closing browser) used to stall EEG processing and the dials sent to
+        the GPU for as long as its socket was backed up. A page that falls
+        behind loses frames; one that stays stuck is dropped."""
         if not self.ui_clients:
             return
         s = protocol.dumps(obj)
-        for ws in list(self.ui_clients):
+        for ws, q in list(self.ui_clients.items()):
             try:
-                await ws.send_str(s)
-            except (ConnectionResetError, RuntimeError):
-                self.ui_clients.discard(ws)
+                q.put_nowait(s)
+            except asyncio.QueueFull:
+                self._ui_drops[ws] = self._ui_drops.get(ws, 0) + 1
+                if self._ui_drops[ws] > 2000:          # stuck for minutes: let it go
+                    self.ui_clients.pop(ws, None)
+                    asyncio.create_task(ws.close())
+
+    async def _ui_writer(self, ws, q):
+        try:
+            while True:
+                await ws.send_str(await q.get())
+        except (ConnectionResetError, RuntimeError, asyncio.CancelledError):
+            pass
 
     # ---- online ---------------------------------------------------------------------
+    def _require_gpu(self):
+        if self.link.state != "connected":
+            raise RuntimeError(
+                f"not connected to the GPU server at {self.link.url} — is the SSH tunnel "
+                f"running? (ssh -N -L 8765:localhost:8765 you@gpu-box)  [{self.link.error}]")
+
     async def start_online(self):
         if self.run_mode == "offline":
             raise RuntimeError("an offline generation is running")
+        self._require_gpu()
         self.audio.reset()
         self._pending_lat.clear()
         self.takes.clear()
@@ -393,8 +428,12 @@ class App:
         delay = float(self.gen["delay_s"])
         self.audio.schedule(t_start + delay, rebuffer_s=min(6.0, max(1.0, delay / 3)))
         self.run_mode = "online"
-        await self.link.send({"type": "start", "t_start": t_start,
-                              "params": self._server_params()})
+        if not await self.link.send({"type": "start", "t_start": t_start,
+                                     "params": self._server_params()}):
+            self.run_mode = None
+            self.audio.reset()
+            self._require_gpu()
+            raise RuntimeError("the GPU server connection dropped while starting")
         self.rec.event("music_start", params=self._server_params())
 
     async def stop_run(self):
@@ -456,6 +495,7 @@ class App:
     async def offline_generate(self):
         if not self.offline:
             raise RuntimeError("analyze a recording first")
+        self._require_gpu()
         if self.run_mode == "online":
             await self.stop_run()
         o = self.offline
@@ -563,11 +603,15 @@ class App:
     async def ws_ui(self, request):
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=64 << 20)
         await ws.prepare(request)
-        self.ui_clients.add(ws)
         await ws.send_str(protocol.dumps({"type": "config", **self.config()}))
         # a reloaded page gets the recent output back instead of a blank timeline
         for m in list(self.takes) + list(self.waves) + list(self.off_msgs):
             await ws.send_str(protocol.dumps(m))
+        for row in list(self.feat_hist):
+            await ws.send_str(protocol.dumps(row))
+        q = asyncio.Queue(maxsize=600)                  # ~15 s of traffic
+        self.ui_clients[ws] = q
+        writer = asyncio.create_task(self._ui_writer(ws, q))
         if self.offline:
             await ws.send_str(protocol.dumps(self._analysis_msg()))
         try:
@@ -579,7 +623,9 @@ class App:
                         await ws.send_str(protocol.dumps(
                             {"type": "error", "msg": f"{type(e).__name__}: {e}"}))
         finally:
-            self.ui_clients.discard(ws)
+            self.ui_clients.pop(ws, None)
+            self._ui_drops.pop(ws, None)
+            writer.cancel()
         return ws
 
 

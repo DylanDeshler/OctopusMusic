@@ -70,7 +70,7 @@
     <!-- ======================= live EEG ======================= -->
     <div class="card online-only">
       <div class="card-h">
-        <h2>EEG</h2>
+        <h2>EEG <span class="small" id="q-summary" title="per-channel quality, PiEEG Contact Calibration style: hover a channel number for p-p / LINE / SNR"></span></h2>
         <div class="row-inline">
           <select id="src-name">
             <option value="octopus">Octopus 16 (Bluetooth)</option>
@@ -84,6 +84,9 @@
             <option>10</option><option selected>25</option><option>50</option><option>100</option><option>250</option>
           </select> µV</label>
           <label>window <select id="eeg-win"><option>5</option><option selected>10</option><option>20</option></select> s</label>
+          <label title="draw each mapped feature (in) and the dial it produces (out) over the traces">overlay <select id="eeg-overlay">
+            <option value="none">none</option><option value="both" selected>in + out</option>
+            <option value="in">features in</option><option value="out">dials out</option></select></label>
         </div>
       </div>
       <div class="eeg-wrap">
@@ -96,11 +99,13 @@
     <div class="grid2 online-only">
       <div class="card">
         <div class="card-h"><h2>Spectrum</h2><span class="small" id="nch"></span></div>
-        <canvas id="c-spec" height="190"></canvas>
+        <canvas id="c-spec" height="260"></canvas>
       </div>
       <div class="card">
-        <div class="card-h"><h2>Dials (last 2 min)</h2><span class="small">what the EEG is asking for</span></div>
-        <canvas id="c-dials" height="190"></canvas>
+        <div class="card-h"><h2>In → Out</h2>
+          <label class="small">dashed = feature in · solid = dial out · last
+            <select id="io-span"><option>30</option><option selected>60</option><option>120</option></select> s</label></div>
+        <canvas id="c-dials" height="260"></canvas>
       </div>
     </div>
 

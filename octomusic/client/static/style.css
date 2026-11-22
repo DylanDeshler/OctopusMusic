@@ -78,3 +78,7 @@ table.stats { border-collapse: collapse; width: 100%; }
 table.stats td, table.stats th { padding: 1px 5px; border-top: 1px solid var(--line); text-align: right; font-family: ui-monospace, Menlo, monospace; }
 table.stats td:first-child, table.stats th:first-child { text-align: left; }
 table.stats tr.used td { color: var(--fg); background: #1b2030; }
+.dot.q-good { background: #4ccf8a; } .dot.q-fair { background: #f5c451; }
+.dot.q-poor { background: #ff9a4a; } .dot.q-railed { background: #ff4d5e; }
+.dot.q-no-contact { background: #555b66; } .dot.q-none { background: #333; }
+h2 .small { text-transform: none; letter-spacing: 0; margin-left: 8px; font-weight: 400; }

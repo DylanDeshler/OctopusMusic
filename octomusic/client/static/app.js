@@ -44,7 +44,7 @@ function onMsg(m) {
       break;
     case "spectrum": spectrum = m; break;
     case "feat":
-      if (m.feats) dialHist.push({ t: m.t, dials: m.dials, artifact: m.artifact });
+      if (m.feats) dialHist.push({ t: m.t, dials: m.dials, artifact: m.artifact, feats: m.feats });
       while (dialHist.length && m.t - dialHist[0].t > 120) dialHist.shift();
       updateMeters(m);
       break;
@@ -188,21 +188,28 @@ function buildDSP() {
   const box = $("dsp-controls"); box.innerHTML = "";
   const d = () => cfg.dsp;
   const set = (k) => (v) => send({ type: "set_dsp", key: k, value: v });
-  const mk = (label, node) => el("span", { class: "row-inline" }, label, node);
-  const num = (k, w = "4em") => {
+  const mk = (label, node, tip = "") => el("span", { class: "row-inline", title: tip }, label, node);
+  const num = (k, w = "3.6em") => {
     const i = el("input", { type: "number", step: "any", style: `width:${w}` });
     i.value = d()[k]; i.onchange = () => set(k)(+i.value);
     bindings.push({ el: i, get: () => d()[k] }); return i;
   };
+  const chk = (k) => {
+    const c = el("input", { type: "checkbox" }); c.checked = d()[k];
+    c.onchange = () => set(k)(c.checked);
+    bindings.push({ el: c, get: () => d()[k], isCheck: true }); return c;
+  };
   const notch = el("select", {}, el("option", { value: 0 }, "off"), el("option", { value: 50 }, "50 Hz"), el("option", { value: 60 }, "60 Hz"));
   notch.value = d().notch_hz; notch.onchange = () => set("notch_hz")(+notch.value);
   bindings.push({ el: notch, get: () => d().notch_hz });
-  const ax = el("input", { type: "checkbox" }); ax.checked = d().auto_exclude;
-  ax.onchange = () => set("auto_exclude")(ax.checked);
-  bindings.push({ el: ax, get: () => d().auto_exclude, isCheck: true });
-  box.append(mk("high-pass", num("hp_hz")), mk("notch", notch), mk("display LP", num("display_lp_hz")),
-    mk("feature window s", num("window_s")), mk("artifact µV", num("artifact_uv", "5em")),
-    mk("auto-exclude bad pins", ax));
+  box.append(
+    mk("Hampel", chk("hampel"), "spike removal (PiEEG default: window 5, 3σ)"),
+    mk("band-pass", el("span", {}, num("bp_lo"), "–", num("bp_hi"), " Hz"), "PiEEG default 1–40 Hz, order 5"),
+    mk("order", num("bp_order", "2.6em")),
+    mk("notch", notch, "mains + first harmonic, Q 30"),
+    mk("feature window s", num("window_s")),
+    mk("artifact µV", num("artifact_uv", "4.4em")),
+    mk("use good/fair pins only", chk("auto_exclude")));
 }
 
 function driveOf(t, r) {
@@ -464,12 +471,20 @@ function updateStatus(s) {
   $("rec-dir").textContent = s.recording ? `→ ${s.recording}` : "";
   $("cal-status").textContent = s.calibrating ? `recording ${s.calibrating.kind}… ${s.calibrating.left}s — hold the state` : "";
   if (s.run_mode === "offline" && s.progress != null) $("off-prog").style.width = `${(s.progress * 100).toFixed(1)}%`;
-  if (cfg) for (let c = 0; c < N_CH; c++) {
-    const d = $(`dot-${c}`), ch = $(`ch-${c}`);
-    if (!d) continue;
-    d.className = "dot " + (s.good[c] ? "good" : "bad");
-    ch.classList.toggle("off", !cfg.dsp.channels[c]);
-    ch.title = `${s.contact[c]} µV rms${s.used[c] ? "" : " — not used for features"}`;
+  if (cfg) {
+    const q = s.quality, counts = {};
+    for (let c = 0; c < N_CH; c++) {
+      const d = $(`dot-${c}`), ch = $(`ch-${c}`);
+      if (!d) continue;
+      const st = q ? q.status[c] : "";
+      counts[st] = (counts[st] || 0) + 1;
+      d.className = "dot q-" + (st || "none").replace(" ", "-");
+      ch.classList.toggle("off", !cfg.dsp.channels[c]);
+      ch.title = q ? `ch ${c + 1}: ${st}\np-p ${q.pp[c]} µV · LINE ${q.line[c]} µV · SNR ${q.snr[c]} dB` +
+        (s.used[c] ? "" : "\nnot used for features") : "warming up";
+    }
+    $("q-summary").textContent = q ? ["good", "fair", "poor", "railed", "no contact"]
+      .filter((k) => counts[k]).map((k) => `${counts[k]} ${k}`).join(" · ") : "";
   }
 }
 
@@ -512,6 +527,16 @@ function drawEEG() {
     }
     g.stroke();
   }
+  const ov = $("eeg-overlay").value;
+  if (ov !== "none" && cfg) {
+    g.fillStyle = "#0c0e1288"; g.fillRect(0, 0, w, h);
+    drawInOut(g, 0, w, 0, h, win, { stack: false, inp: ov !== "out", out: ov !== "in" });
+    g.font = "11px sans-serif"; let lx = 6;
+    for (const t of activeRoutes()) {
+      g.fillStyle = COLORS[t]; g.fillRect(lx, 6, 10, 3); g.fillStyle = "#c8ccd6"; g.fillText(t, lx + 13, 11); lx += 22 + g.measureText(t).width;
+    }
+    g.fillStyle = "#8a91a2"; g.fillText("solid = dial out · dashed = feature in", lx + 6, 11);
+  }
 }
 const BAND_SHADE = [["δ", 1, 4], ["θ", 4, 8], ["α", 8, 13], ["β", 13, 30], ["γ", 30, 45], ["EMG", 65, 95]];
 function drawSpec() {
@@ -529,20 +554,68 @@ function drawSpec() {
   spectrum.f.forEach((f, i) => (i ? g.lineTo(X(f), Y(p[i])) : g.moveTo(X(f), Y(p[i]))));
   g.stroke();
 }
+// ---- what comes in (features) and what goes out (dials) --------------------
+function activeRoutes() {
+  return cfg.targets.filter((t) => driveOf(t, cfg.routes[t]) !== "off");
+}
+function featVal(d, expr) {
+  if (!d.feats) return null;
+  if (expr in d.feats) return d.feats[expr];
+  let tot = 0;
+  for (const m of expr.replace(/\s+/g, "").matchAll(/([+-]?)(\d*\.?\d+)?\*?([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    if (!(m[3] in d.feats)) return null;
+    tot += (m[1] === "-" ? -1 : 1) * (m[2] ? +m[2] : 1) * d.feats[m[3]];
+  }
+  return tot;
+}
+function drawInOut(g, x0, w, y0, h, span, opts) {
+  // one band per driven route: dashed = its feature (in, min-max scaled over the
+  // visible window), solid = the dial it produced (out, 0..1)
+  const routes = activeRoutes();
+  if (!routes.length || !dialHist.length) return;
+  const tN = Date.now() / 1000, X = (t) => x0 + w - ((tN - t) / span) * w;
+  const vis = dialHist.filter((d) => tN - d.t <= span);
+  const lane = opts.stack ? h / routes.length : h;
+  routes.forEach((t, i) => {
+    const r = cfg.routes[t], top = y0 + (opts.stack ? i * lane : 0);
+    const Y = (u) => top + lane - 4 - u * (lane - 8);
+    if (opts.stack) {
+      g.fillStyle = i % 2 ? "#10131a" : "#0d1016"; g.fillRect(x0, top, w, lane);
+      g.fillStyle = "#8a91a2"; g.font = "11px sans-serif";
+      g.fillText(`${r.source === "manual" || r.drive === "manual" && !SCALARS.includes(t) ? "manual" : r.feature}  →  ${t}`, x0 + 4, top + 12);
+    }
+    if (opts.inp && driveOf(t, r) === "eeg") {
+      const vals = vis.map((d) => featVal(d, r.feature)).filter((v) => v != null && isFinite(v));
+      if (vals.length > 1) {
+        const lo = Math.min(...vals), hi = Math.max(...vals);
+        g.save(); g.setLineDash([4, 3]); g.strokeStyle = COLORS[t] + "aa"; g.lineWidth = 1.2; g.beginPath();
+        let prevT = null;
+        for (const d of vis) {
+          const v = featVal(d, r.feature); if (v == null) continue;
+          const y = Y((v - lo) / Math.max(1e-12, hi - lo));
+          (prevT === null || d.t - prevT > 1.5) ? g.moveTo(X(d.t), y) : g.lineTo(X(d.t), y);
+          prevT = d.t;
+        }
+        g.stroke(); g.restore();
+        if (opts.stack) { g.fillStyle = "#6b7183"; g.fillText(`${fmtNum(lo)} … ${fmtNum(hi)}`, x0 + w - 90, top + 12); }
+      }
+    }
+    if (opts.out) {
+      g.strokeStyle = COLORS[t]; g.lineWidth = opts.stack ? 2 : 2.2; g.beginPath();
+      vis.forEach((d, k) => ((k && d.t - vis[k - 1].t <= 1.5) ? g.lineTo(X(d.t), Y(d.dials[t])) : g.moveTo(X(d.t), Y(d.dials[t]))));
+      g.stroke();
+    }
+  });
+  g.fillStyle = "#3a1a2066";
+  for (const d of vis) if (d.artifact) g.fillRect(X(d.t) - 1, y0, 3, h);
+}
 function drawDials() {
   const [g, w, h] = fit($("c-dials"));
   g.clearRect(0, 0, w, h);
-  if (!dialHist.length || !cfg) return;
-  const tN = dialHist[dialHist.length - 1].t, X = (t) => w - ((tN - t) / 120) * w, Y = (u) => h - 4 - u * (h - 8);
-  g.fillStyle = "#3a1a20";
-  for (const d of dialHist) if (d.artifact) g.fillRect(X(d.t) - 1, 0, 3, h);
-  for (const t of cfg.targets) {
-    if (driveOf(t, cfg.routes[t]) === "off") continue;
-    g.strokeStyle = COLORS[t]; g.lineWidth = 1.5; g.beginPath();
-    dialHist.forEach((d, i) => (i ? g.lineTo(X(d.t), Y(d.dials[t])) : g.moveTo(X(d.t), Y(d.dials[t]))));
-    g.stroke();
-  }
+  if (!cfg) return;
+  drawInOut(g, 0, w, 0, h, +$("io-span").value, { stack: true, inp: true, out: true });
 }
+
 function valueToDial(t, v) {
   const [lo, hi, log] = cfg.gen.bands[t];
   const u = log ? (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) : (v - lo) / (hi - lo);

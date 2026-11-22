@@ -16,10 +16,9 @@ import csv
 import os
 
 import numpy as np
-from scipy import signal
-
-from octomusic.client.dsp import DSP, FEATURES, compute_features
-from octomusic.client.sources import N_CH, NOMINAL_FS
+from octomusic.client.dsp import (DEFAULT_DSP, FEATURES, FilterBank, channel_quality,
+                                  compute_features, used_channels)
+from octomusic.client.sources import NOMINAL_FS
 
 HOP_S = 0.25
 
@@ -41,30 +40,22 @@ def load_recording(path: str):
 
 def extract(t, x, fs, dsp_cfg: dict, start_s=0.0, duration_s=None):
     """Feature series over [start_s, start_s+duration_s) of the recording.
-    Returns dict(times, feats{name: array}, spec12 (n,12), artifact (n,))."""
-    dsp = DSP(fs)
-    dsp.configure(**{k: v for k, v in dsp_cfg.items() if k in dsp.cfg})
-    y = x.astype(np.float64)
-    if dsp.sos is not None:
-        zi = signal.sosfilt_zi(dsp.sos)[:, :, None] * y[0][None, None, :]
-        y, _ = signal.sosfilt(dsp.sos, y, axis=0, zi=zi)
-    y = y.astype(np.float32)
-    win = int(dsp.cfg["window_s"] * fs)
+    Same FilterBank, quality test and feature function as live, stepped at
+    the live hop. Returns dict(times, feats{name: array}, spec12, artifact)."""
+    cfg = {**DEFAULT_DSP, **{k: v for k, v in dsp_cfg.items() if k in DEFAULT_DSP}}
+    bank = FilterBank(fs, cfg)
+    clean, wide, hp = bank(x)
+    win = int(cfg["window_s"] * fs)
     hop = max(1, int(HOP_S * fs))
-    i0 = max(win + int(fs), int(start_s * fs))           # skip filter warm-up
-    i1 = len(y) if duration_s is None else min(len(y), int((start_s + duration_s) * fs))
-    en = np.asarray(dsp.cfg["channels"], bool)
+    i0 = max(win + int(2 * fs), int(start_s * fs))        # skip filter warm-up
+    i1 = len(x) if duration_s is None else min(len(x), int((start_s + duration_s) * fs))
+    k = int(fs)
     times, rows, specs, arts = [], [], [], []
     for i in range(i0, i1 + 1, hop):
-        seg = y[i - win:i]
-        # contact test per window, like live
-        k = int(0.5 * fs)
-        rms = np.sqrt(np.mean((seg[-k:] - seg[-k:].mean(axis=0)) ** 2, axis=0))
-        good = (rms >= dsp.cfg["contact_lo"]) & (rms <= dsp.cfg["contact_hi"])
-        use = en & good if dsp.cfg["auto_exclude"] else en
-        if not use.any():
-            use = en if en.any() else np.ones(N_CH, bool)
-        feats, sp, art, _, _ = compute_features(seg, fs, use, dsp.cfg["artifact_uv"])
+        q = channel_quality(clean[i - k:i], hp[i - 2 * k:i], x[i - k:i], fs, cfg["notch_hz"])
+        use = used_channels(cfg, q["good"])
+        feats, sp, art, _, _ = compute_features(clean[i - win:i], wide[i - win:i], fs, use,
+                                                cfg["artifact_uv"])
         times.append(float(t[i - 1]))
         rows.append(feats)
         specs.append(sp)
